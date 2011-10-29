@@ -1,3 +1,4 @@
+#include "postgres.h"
 
 typedef struct histogram_data {
 
@@ -19,4 +20,5 @@ typedef enum {
 } histogram_type_t;
 
 histogram_data * query_hist_get_data();
-void query_hist_reset(bool);
+void query_hist_reset(bool locked);
+void query_hist_refresh();

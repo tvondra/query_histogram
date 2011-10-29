@@ -8,3 +8,8 @@ CREATE OR REPLACE FUNCTION query_histogram_reset()
     RETURNS void
     AS 'MODULE_PATHNAME', 'query_histogram_reset'
     LANGUAGE C IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION query_histogram_refresh()
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'query_histogram_refresh'
+    LANGUAGE C IMMUTABLE;

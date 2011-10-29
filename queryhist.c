@@ -395,6 +395,7 @@ void query_hist_reset(bool locked) {
         (*histogram_bins) = default_histogram_bins;
         (*histogram_step) = default_histogram_step;
         (*histogram_sample_pct) = default_histogram_sample_pct;
+        (*histogram_type) = default_histogram_type;
         
         memset(histogram_count_bins, 0, (HIST_BINS_MAX+1)*sizeof(hist_bin_t));
         memset(histogram_time_bins,  0, (HIST_BINS_MAX+1)*sizeof(hist_bin_t));
@@ -405,11 +406,30 @@ void query_hist_reset(bool locked) {
     
 }
 
+void query_hist_refresh() {
+    
+    if (histogram_initialized) {
+        
+        semaphore_lock();
+    
+        default_histogram_bins = (*histogram_bins);
+        default_histogram_step = (*histogram_step);
+        default_histogram_sample_pct = (*histogram_sample_pct);
+        default_histogram_type = (*histogram_type);
+        
+        semaphore_unlock();
+        
+    }
+    
+}
+
 void query_hist_add_query(int duration) {
+    
+    int bin;
     
     semaphore_lock();
     
-    int bin = duration / (*histogram_step);
+    bin = duration / (*histogram_step);
     
     /* queries that take longer than the last bin should go to
      * the (HIST_BINS_MAX+1) bin */
