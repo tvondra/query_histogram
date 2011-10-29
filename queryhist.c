@@ -1,5 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/shm.h>
+#include <sys/stat.h>
+
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
 
 #include "postgres.h"
 #include "queryhist.h"
@@ -8,49 +14,86 @@
 #include "executor/instrument.h"
 #include "utils/guc.h"
 
-/* How are the histogram bins scaled? */
-typedef enum {
-    HISTOGRAM_LINEAR,
-    HISTOGRAM_LOG
-} histogram_type;
-
 static const struct config_enum_entry histogram_type_options[] = {
     {"linear", HISTOGRAM_LINEAR, false},
-    {"log", HISTOGRAM_LOG, false}
+    {"log", HISTOGRAM_LOG, false},
+    {NULL, 0, false}
 };
 
-#define HIST_BINS_MAX 1000
-
-static int query_histogram_bins_count = 0; /* number of bins (0 - disable) */
-static int query_histogram_bins_width = 10; /* msec (bin width) */
-static int query_histogram_sample_pct = 5; /* portion of queries to sample */
 static int query_histogram_type = HISTOGRAM_LINEAR; /* histogram type */
 
 static int nesting_level = 0;
 
-static unsigned long histogram_count_bins[HIST_BINS_MAX+1];
-static unsigned long histogram_time_bins[HIST_BINS_MAX+1];
+typedef unsigned long hist_bin_t;
+
+/* The histogram itself is stored in a shared memory segment
+ * with this layout
+ * 
+ * - users (int => 4B)
+ * - bins (int => 4B)
+ * - step (int => 4B)
+ * - type (int => 4B)
+ * - sample (int => 4B)
+ * - count bins (HIST_BINS_MAX+1) x sizeof(unsigned long)
+ * - time  bins (HIST_BINS_MAX+1) x sizeof(unsigned long)
+ * 
+ * This segment is initialized in the first process that accesses it (see
+ * query_hist_init function).
+ */
+#define SEGMENT_KEY   43873
+#define SEMAPHORE_KEY 43874
+
+#define HIST_BINS_MAX 1000
+
+static bool  histogram_initialized = FALSE;
+static int * histogram_users;
+static int * histogram_bins;
+static int * histogram_step;
+static histogram_type_t * histogram_type;
+static int * histogram_sample_pct;
+
+/* default values */
+static int default_histogram_bins = 100;
+static int default_histogram_step = 100;
+static int default_histogram_sample_pct = 5;
+static int default_histogram_type = HISTOGRAM_LINEAR;
+
+static hist_bin_t * histogram_count_bins;
+static hist_bin_t * histogram_time_bins;
+
+/* semaphore used to sync access to the shared segment */
+static int semaphore_id;
 
 #define query_histogram_enabled() \
-    ((query_histogram_bins_count > 0) && (nesting_level == 0))
+    ((histogram_initialized) && (nesting_level == 0) && ((*histogram_bins) > 0))
 
 /* Saved hook values in case of unload */
-static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
-static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
+static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
+static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 
 static void set_histogram_bins_count_hook(int newval, void *extra);
 static void set_histogram_bins_width_hook(int newval, void *extra);
 static void set_histogram_sample_hook(int newval, void *extra);
+static void set_histogram_type_hook(int newval, void *extra);
 
-void            _PG_init(void);
-void            _PG_fini(void);
+void        _PG_init(void);
+void        _PG_fini(void);
 
 static void explain_ExecutorStart(QueryDesc *queryDesc, int eflags);
-static void explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count);
+static void explain_ExecutorRun(QueryDesc *queryDesc,
+                    ScanDirection direction,
+                    long count);
 static void explain_ExecutorFinish(QueryDesc *queryDesc);
 static void explain_ExecutorEnd(QueryDesc *queryDesc);
+
+/* private functions */
+void query_hist_init();
+void query_hist_add_query(int duration);
+
+void semaphore_lock();
+void semaphore_unlock();
 
 /*
  * Module load callback
@@ -62,8 +105,8 @@ _PG_init(void)
     DefineCustomIntVariable("query_histogram.bin_count",
                          "Sets the number of bins of the histogram.",
                          "Zero disables collecting the histogram.",
-                            &query_histogram_bins_count,
-                            0,
+                            &default_histogram_bins,
+                            100,
                             0, 1000,
                             PGC_SUSET,
                             GUC_UNIT_MS,
@@ -74,8 +117,8 @@ _PG_init(void)
     DefineCustomIntVariable("query_histogram.bin_width",
                          "Sets the width of the histogram bin.",
                             NULL,
-                            &query_histogram_bins_width,
-                            10,
+                            &default_histogram_step,
+                            100,
                             1, 1000,
                             PGC_SUSET,
                             GUC_UNIT_MS,
@@ -86,7 +129,7 @@ _PG_init(void)
     DefineCustomIntVariable("query_histogram.sample_pct",
                          "What portion of the queries should be sampled (in percent).",
                             NULL,
-                            &query_histogram_sample_pct,
+                            &default_histogram_sample_pct,
                             5,
                             1, 100,
                             PGC_SUSET,
@@ -98,13 +141,13 @@ _PG_init(void)
     DefineCustomEnumVariable("query_histogram.histogram_type",
                              "Type of the histogram (how the bin width is computed).",
                              NULL,
-                             &query_histogram_type,
+                             &default_histogram_type,
                              HISTOGRAM_LINEAR,
                              histogram_type_options,
                              PGC_SUSET,
                              0,
                              NULL,
-                             NULL,
+                             &set_histogram_type_hook,
                              NULL);
 
     EmitWarningsOnPlaceholders("query_histogram");
@@ -119,7 +162,8 @@ _PG_init(void)
     prev_ExecutorEnd = ExecutorEnd_hook;
     ExecutorEnd_hook = explain_ExecutorEnd;
     
-    query_hist_init(query_histogram_bins_count, query_histogram_bins_width);
+    /* FIXME reference the proper GUC default values somehow */
+    query_hist_init();
     
 }
 
@@ -135,6 +179,14 @@ _PG_fini(void)
     ExecutorRun_hook = prev_ExecutorRun;
     ExecutorFinish_hook = prev_ExecutorFinish;
     ExecutorEnd_hook = prev_ExecutorEnd;
+    
+    /* FIXME I can't mark the segment as "deletable" as it would cause
+     * occasional data loss (the OS could remove the histogram segment).
+     * Anyway it's just 8kB of data, so it's not a big issue.
+     */
+    if (histogram_initialized) {
+        --(*histogram_users);
+    }
 }
 
 /*
@@ -219,22 +271,31 @@ explain_ExecutorFinish(QueryDesc *queryDesc)
 static void
 explain_ExecutorEnd(QueryDesc *queryDesc)
 {
+    
     if (queryDesc->totaltime && query_histogram_enabled())
     {
         int msec;
-
+        
         /*
          * Make sure stats accumulation is done.  (Note: it's okay if several
          * levels of hook all do this.)
          */
         InstrEndLoop(queryDesc->totaltime);
-
+        
         /* Log plan if duration is exceeded. */
         msec = (int)round(queryDesc->totaltime->total * 1000.0);
         
-        if (rand() % 100 < query_histogram_sample_pct) {
+        /* FIXME I don't like this - it accesses the histogram_sample_pct, so it has
+                 to be protected by a lock or something (as it's a pointer to the
+                 shared segment). That'd kinda defeat the whole sampling idea, so
+                 I'll probably replace it by default_histogram_sample_pct (the only
+                 downside is it's refreshed only when something else changes and on
+                 reconnects). */
+        semaphore_lock();
+        if ((histogram_initialized) && (rand() % 100 < (*histogram_sample_pct))) {
             query_hist_add_query((int)round(msec));
         }
+        semaphore_unlock();
         
     }
 
@@ -242,40 +303,124 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
         prev_ExecutorEnd(queryDesc);
     else
         standard_ExecutorEnd(queryDesc);
+    
 }
 
-void query_hist_free() {
+/* FIXME There should be a semaphore / mutex guarding the segment. */
+void query_hist_init() {
+
+    int segment_id;
+    int required_size;
+    char * data;
+    bool created = FALSE;
     
-    /* free the original histogram (if needed) */
-    if (histogram_count_bins != NULL) {
-        pfree(histogram_count_bins);
-        pfree(histogram_time_bins);
+    /* initialize semaphore */
+    semaphore_id = semget(SEMAPHORE_KEY, 1, IPC_CREAT);
+    
+    if (semaphore_id == -1) {
+        /* not sure if this is enough - maybe it will crash later or something */
+        elog(ERROR, "semaphore for histogram synchronization not created");
+        return;
     }
+    
+    /* initialize shared memory segment */
+    required_size = 5*sizeof(int) + 2*(HIST_BINS_MAX+1) * sizeof(hist_bin_t);
+    
+    elog(DEBUG1, "initializing histogram segment (size: %d B)", required_size);
+    
+    /* lock the semaphore */
+    semaphore_lock();
+    
+    /* check if there's an existing segment */
+    segment_id = shmget(SEGMENT_KEY, required_size, S_IRUSR | S_IWUSR);
+    if (segment_id == -1) {
+        
+        /* try to create a new segment */
+        segment_id = shmget(SEGMENT_KEY, required_size, IPC_CREAT | S_IRUSR | S_IWUSR);
+        if (segment_id == -1) {
+            /* not sure if this is enough - maybe it will crash later or something */
+            elog(ERROR, "shared memory segment (histogram) not allocated");
+            return;
+        }
+        
+        elog(DEBUG1, "shared memory segment (histogram) %d successfully created", SEGMENT_KEY);
+        created = TRUE;
+        
+    }
+    
+    /* there should be a segment existing, try to attach it */
+    data = (char*)shmat(segment_id, 0, 0);
+    
+    if (data == (void*)-1) {
+        elog(ERROR, "shared memory segment (histogram) %d not attached", SEGMENT_KEY);
+        return;
+    }
+    
+    elog(DEBUG1, "shared memory segment (histogram) successfully attached");
+    
+    /* set the users/bins/step/sample properly */
+    histogram_users = (int*)data;
+    histogram_bins  = (int*)(data + sizeof(int));
+    histogram_step  = (int*)(data + 2*sizeof(int));
+    histogram_type  = (histogram_type_t*)(data + 3*sizeof(int));
+    histogram_sample_pct = (int*)(data + 3*sizeof(int) + sizeof(histogram_type_t));
+    
+    histogram_count_bins = (hist_bin_t*)(data + 4*sizeof(int) + sizeof(histogram_type_t));
+    histogram_time_bins  = (hist_bin_t*)(data + 4*sizeof(int) + sizeof(histogram_type_t) + (HIST_BINS_MAX+1)*sizeof(hist_bin_t));
+    
+    /* increase the histogram users count */
+    ++(*histogram_users);
 
+    /* reset the histogram (set to zeroes), */
+    if (created) {
+        query_hist_reset(true);
+    } else {
+        default_histogram_bins = (*histogram_bins);
+        default_histogram_step = (*histogram_step);
+        default_histogram_sample_pct = (*histogram_sample_pct);
+    }
+    
+    /* increase the number or users */
+    ++(*histogram_users);
+    
+    /* init done, unlock the semaphore */
+    semaphore_unlock();
+    
+    /* initialized successfully */
+    histogram_initialized = TRUE;
+
+    /* seed the random generator */
+    srand(SEGMENT_KEY);
+    
 }
 
-void query_hist_init(int bins, int step) {
-
-    srand(bins + step);
+void query_hist_reset(bool locked) {
     
-    query_hist_reset(bins);
+    if (histogram_initialized) {
+        
+        if (! locked) { semaphore_lock(); }
     
-}
-
-void query_hist_reset(int bins) {
+        (*histogram_bins) = default_histogram_bins;
+        (*histogram_step) = default_histogram_step;
+        (*histogram_sample_pct) = default_histogram_sample_pct;
+        
+        memset(histogram_count_bins, 0, (HIST_BINS_MAX+1)*sizeof(hist_bin_t));
+        memset(histogram_time_bins,  0, (HIST_BINS_MAX+1)*sizeof(hist_bin_t));
+        
+        if (! locked) { semaphore_unlock(); }
+        
+    }
     
-    memset(histogram_count_bins, 0, HIST_BINS_MAX+1);
-    memset(histogram_time_bins,  0, HIST_BINS_MAX+1);
 }
 
 void query_hist_add_query(int duration) {
     
-    int bin = duration / query_histogram_bins_width;
+    int bin = duration / (*histogram_step);
     
     /* queries that take longer than the last bin should go to
      * the (HIST_BINS_MAX+1) bin */
-    if (bin >= HIST_BINS_MAX) {
-        bin = HIST_BINS_MAX;
+    if (bin >= (*histogram_bins)) {
+        bin = (*histogram_bins);
     }
     
     histogram_count_bins[bin] += 1;
@@ -290,48 +435,117 @@ histogram_data * query_hist_get_data() {
     histogram_data * tmp = (histogram_data *)palloc(sizeof(histogram_data));
     
     memset(tmp, 0, sizeof(histogram_data));
+    
+    semaphore_lock();
 
-    tmp->bins_count = query_histogram_bins_count;
-    tmp->bins_width = query_histogram_bins_width;
+    tmp->bins_count = (*histogram_bins);
+    tmp->bins_width = (*histogram_step);
     
-    if (query_histogram_bins_count > 0) {
+    if ((*histogram_bins) > 0) {
     
-        tmp->count_data = (unsigned long *) palloc(sizeof(unsigned long) * (query_histogram_bins_count+1));
-        tmp->time_data  = (unsigned long *) palloc(sizeof(unsigned long) * (query_histogram_bins_count+1));
+        tmp->count_data = (hist_bin_t *) palloc(sizeof(hist_bin_t) * ((*histogram_bins)+1));
+        tmp->time_data  = (hist_bin_t *) palloc(sizeof(hist_bin_t) * ((*histogram_bins)+1));
         
-        memcpy(tmp->count_data, histogram_count_bins, sizeof(unsigned long) * (query_histogram_bins_count+1));
-        memcpy(tmp->time_data,  histogram_time_bins,  sizeof(unsigned long) * (query_histogram_bins_count+1));
+        memcpy(tmp->count_data, histogram_count_bins, sizeof(hist_bin_t) * ((*histogram_bins)+1));
+        memcpy(tmp->time_data,  histogram_time_bins,  sizeof(hist_bin_t) * ((*histogram_bins)+1));
         
-        for (i = 0; i < query_histogram_bins_count+1; i++) {
+        for (i = 0; i < (*histogram_bins)+1; i++) {
             tmp->total_count += tmp->count_data[i];
             tmp->total_time  += tmp->time_data[i];
         }
         
     }
+    
+    semaphore_unlock();
 
     return tmp;
 
 }
 
-int  query_hist_get_bins() {
-    return query_histogram_bins_count;
-}
-
-int  query_hist_get_step() {
-    return query_histogram_bins_width;
-}
-
 static
 void set_histogram_bins_count_hook(int newval, void *extra) {
-    query_hist_init(newval, query_histogram_bins_width);
+    
+    default_histogram_bins = newval;
+
+    if (histogram_initialized) {
+        semaphore_lock();
+        default_histogram_step = (*histogram_step);
+        default_histogram_sample_pct = (*histogram_sample_pct);
+        default_histogram_type = (*histogram_type);
+        semaphore_unlock();
+    }
+    
+    query_hist_reset(false);
+    
 }
 
 static
 void set_histogram_bins_width_hook(int newval, void *extra) {
-    query_hist_init(query_histogram_bins_count, newval);
+    default_histogram_step = newval;
+    
+    if (histogram_initialized) {
+        semaphore_lock();
+        default_histogram_bins = (*histogram_bins);
+        default_histogram_sample_pct = (*histogram_sample_pct);
+        default_histogram_type = (*histogram_type);
+        semaphore_unlock();
+    }
+    
+    query_hist_reset(false);
 }
 
 static
 void set_histogram_sample_hook(int newval, void *extra) {
-    query_hist_init(query_histogram_bins_count, query_histogram_bins_width);
+    
+    default_histogram_sample_pct = newval;
+    
+    if (histogram_initialized) {
+        semaphore_lock();
+        default_histogram_bins = (*histogram_bins);
+        default_histogram_step = (*histogram_step);
+        default_histogram_type = (*histogram_type);
+        semaphore_unlock();
+    }
+
+    query_hist_reset(false);
+}
+
+static
+void set_histogram_type_hook(int newval, void *extra) {
+    
+    default_histogram_type = newval;
+    
+    if (histogram_initialized) {
+        semaphore_lock();
+        default_histogram_bins = (*histogram_bins);
+        default_histogram_step = (*histogram_step);
+        default_histogram_sample_pct = (*histogram_sample_pct);
+        semaphore_unlock();
+    }
+    
+    query_hist_reset(false);
+}
+
+void semaphore_lock() {
+    
+    struct sembuf operations[1];
+    
+    operations[0].sem_num = 0;
+    operations[0].sem_op = -1;
+    operations[0].sem_flg = SEM_UNDO;
+    
+    semop (semaphore_id, operations, 1);
+    
+}
+
+void semaphore_unlock() {
+    
+    struct sembuf operations[1];
+
+    operations[0].sem_num = 0;
+    operations[0].sem_op = 1;
+    operations[0].sem_flg = SEM_UNDO;
+
+    semop (semaphore_id, operations, 1);
+
 }

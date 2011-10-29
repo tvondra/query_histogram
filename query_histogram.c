@@ -15,8 +15,10 @@ PG_MODULE_MAGIC;
 #endif
 
 PG_FUNCTION_INFO_V1(query_histogram);
+PG_FUNCTION_INFO_V1(query_histogram_reset);
 
 Datum query_histogram(PG_FUNCTION_ARGS);
+Datum query_histogram_reset(PG_FUNCTION_ARGS);
 
 Datum
 query_histogram(PG_FUNCTION_ARGS)
@@ -125,4 +127,11 @@ query_histogram(PG_FUNCTION_ARGS)
         SRF_RETURN_DONE(funcctx);
     }
 
+}
+
+Datum
+query_histogram_reset(PG_FUNCTION_ARGS)
+{
+    query_hist_reset(false);
+    PG_RETURN_VOID();
 }
