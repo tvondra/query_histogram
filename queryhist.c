@@ -284,18 +284,10 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
         
         /* Log plan if duration is exceeded. */
         msec = (int)round(queryDesc->totaltime->total * 1000.0);
-        
-        /* FIXME I don't like this - it accesses the histogram_sample_pct, so it has
-                 to be protected by a lock or something (as it's a pointer to the
-                 shared segment). That'd kinda defeat the whole sampling idea, so
-                 I'll probably replace it by default_histogram_sample_pct (the only
-                 downside is it's refreshed only when something else changes and on
-                 reconnects). */
-        semaphore_lock();
-        if ((histogram_initialized) && (rand() % 100 < (*histogram_sample_pct))) {
+
+        if ((histogram_initialized) && (rand() % 100 < default_histogram_sample_pct)) {
             query_hist_add_query((int)round(msec));
         }
-        semaphore_unlock();
         
     }
 
@@ -415,6 +407,8 @@ void query_hist_reset(bool locked) {
 
 void query_hist_add_query(int duration) {
     
+    semaphore_lock();
+    
     int bin = duration / (*histogram_step);
     
     /* queries that take longer than the last bin should go to
@@ -425,6 +419,8 @@ void query_hist_add_query(int duration) {
     
     histogram_count_bins[bin] += 1;
     histogram_time_bins[bin] += duration;
+        
+    semaphore_unlock();
     
 }
 
