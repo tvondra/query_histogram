@@ -1,0 +1,6 @@
+# query histogram
+comment = 'Provides access to query histogram.'
+default_version = '1.0'
+relocatable = true
+
+module_pathname = '$libdir/query_histogram'
