@@ -429,13 +429,17 @@ void query_hist_add_query(hist_bin_time_t duration) {
     
     semaphore_lock();
     
-    bin = (int)ceil(duration * 1000.0) / (*histogram_step);
+    /* refresh the local variables */
+    default_histogram_bins = (*histogram_bins);
+    default_histogram_step = (*histogram_step);
+    default_histogram_sample_pct = (*histogram_sample_pct);
+    default_histogram_type = (*histogram_type);
+    
+    bin = (int)ceil(duration * 1000.0) / default_histogram_step;
     
     /* queries that take longer than the last bin should go to
      * the (HIST_BINS_MAX+1) bin */
-    if (bin >= (*histogram_bins)) {
-        bin = (*histogram_bins);
-    }
+    bin = (bin >= default_histogram_bins) ? default_histogram_bins : bin;
     
     histogram_count_bins[bin] += 1;
     histogram_time_bins[bin] += duration;
