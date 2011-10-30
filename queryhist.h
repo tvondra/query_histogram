@@ -6,10 +6,10 @@ typedef struct histogram_data {
     unsigned int bins_width;
     
     unsigned long total_count;
-    unsigned long total_time;
+    float4        total_time;
     
     unsigned long * count_data;
-    unsigned long * time_data;
+    float4        * time_data;
     
 } histogram_data;
 

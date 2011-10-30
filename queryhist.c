@@ -20,11 +20,10 @@ static const struct config_enum_entry histogram_type_options[] = {
     {NULL, 0, false}
 };
 
-static int query_histogram_type = HISTOGRAM_LINEAR; /* histogram type */
-
 static int nesting_level = 0;
 
-typedef unsigned long hist_bin_t;
+typedef unsigned long hist_bin_count_t;
+typedef float4        hist_bin_time_t;
 
 /* The histogram itself is stored in a shared memory segment
  * with this layout
@@ -58,8 +57,8 @@ static int default_histogram_step = 100;
 static int default_histogram_sample_pct = 5;
 static int default_histogram_type = HISTOGRAM_LINEAR;
 
-static hist_bin_t * histogram_count_bins;
-static hist_bin_t * histogram_time_bins;
+static hist_bin_count_t * histogram_count_bins;
+static hist_bin_time_t * histogram_time_bins;
 
 /* semaphore used to sync access to the shared segment */
 static int semaphore_id;
@@ -90,7 +89,7 @@ static void explain_ExecutorEnd(QueryDesc *queryDesc);
 
 /* private functions */
 void query_hist_init();
-void query_hist_add_query(int duration);
+void query_hist_add_query(hist_bin_time_t duration);
 
 void semaphore_lock();
 void semaphore_unlock();
@@ -274,7 +273,7 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
     
     if (queryDesc->totaltime && query_histogram_enabled())
     {
-        int msec;
+        float seconds;
         
         /*
          * Make sure stats accumulation is done.  (Note: it's okay if several
@@ -283,10 +282,10 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
         InstrEndLoop(queryDesc->totaltime);
         
         /* Log plan if duration is exceeded. */
-        msec = (int)round(queryDesc->totaltime->total * 1000.0);
+        seconds = queryDesc->totaltime->total;
 
         if ((histogram_initialized) && (rand() % 100 < default_histogram_sample_pct)) {
-            query_hist_add_query((int)round(msec));
+            query_hist_add_query(seconds);
         }
         
     }
@@ -316,7 +315,7 @@ void query_hist_init() {
     }
     
     /* initialize shared memory segment */
-    required_size = 5*sizeof(int) + 2*(HIST_BINS_MAX+1) * sizeof(hist_bin_t);
+    required_size = 5*sizeof(int) + (HIST_BINS_MAX+1) * sizeof(hist_bin_count_t) + (HIST_BINS_MAX+1) * sizeof(hist_bin_time_t);
     
     elog(DEBUG1, "initializing histogram segment (size: %d B)", required_size);
     
@@ -357,8 +356,8 @@ void query_hist_init() {
     histogram_type  = (histogram_type_t*)(data + 3*sizeof(int));
     histogram_sample_pct = (int*)(data + 3*sizeof(int) + sizeof(histogram_type_t));
     
-    histogram_count_bins = (hist_bin_t*)(data + 4*sizeof(int) + sizeof(histogram_type_t));
-    histogram_time_bins  = (hist_bin_t*)(data + 4*sizeof(int) + sizeof(histogram_type_t) + (HIST_BINS_MAX+1)*sizeof(hist_bin_t));
+    histogram_count_bins = (hist_bin_count_t*)(data + 4*sizeof(int) + sizeof(histogram_type_t));
+    histogram_time_bins  =  (hist_bin_time_t*)(data + 4*sizeof(int) + sizeof(histogram_type_t) + (HIST_BINS_MAX+1)*sizeof(hist_bin_count_t));
     
     /* increase the histogram users count */
     ++(*histogram_users);
@@ -397,8 +396,8 @@ void query_hist_reset(bool locked) {
         (*histogram_sample_pct) = default_histogram_sample_pct;
         (*histogram_type) = default_histogram_type;
         
-        memset(histogram_count_bins, 0, (HIST_BINS_MAX+1)*sizeof(hist_bin_t));
-        memset(histogram_time_bins,  0, (HIST_BINS_MAX+1)*sizeof(hist_bin_t));
+        memset(histogram_count_bins, 0, (HIST_BINS_MAX+1)*sizeof(hist_bin_count_t));
+        memset(histogram_time_bins,  0, (HIST_BINS_MAX+1)*sizeof(hist_bin_time_t));
         
         if (! locked) { semaphore_unlock(); }
         
@@ -423,13 +422,13 @@ void query_hist_refresh() {
     
 }
 
-void query_hist_add_query(int duration) {
+void query_hist_add_query(hist_bin_time_t duration) {
     
     int bin;
     
     semaphore_lock();
     
-    bin = duration / (*histogram_step);
+    bin = (int)ceil(duration * 1000.0) / (*histogram_step);
     
     /* queries that take longer than the last bin should go to
      * the (HIST_BINS_MAX+1) bin */
@@ -439,7 +438,7 @@ void query_hist_add_query(int duration) {
     
     histogram_count_bins[bin] += 1;
     histogram_time_bins[bin] += duration;
-        
+    
     semaphore_unlock();
     
 }
@@ -459,11 +458,11 @@ histogram_data * query_hist_get_data() {
     
     if ((*histogram_bins) > 0) {
     
-        tmp->count_data = (hist_bin_t *) palloc(sizeof(hist_bin_t) * ((*histogram_bins)+1));
-        tmp->time_data  = (hist_bin_t *) palloc(sizeof(hist_bin_t) * ((*histogram_bins)+1));
+        tmp->count_data = (hist_bin_count_t *) palloc(sizeof(hist_bin_count_t) * ((*histogram_bins)+1));
+        tmp->time_data  =  (hist_bin_time_t *) palloc(sizeof(hist_bin_time_t)  * ((*histogram_bins)+1));
         
-        memcpy(tmp->count_data, histogram_count_bins, sizeof(hist_bin_t) * ((*histogram_bins)+1));
-        memcpy(tmp->time_data,  histogram_time_bins,  sizeof(hist_bin_t) * ((*histogram_bins)+1));
+        memcpy(tmp->count_data, histogram_count_bins, sizeof(hist_bin_count_t) * ((*histogram_bins)+1));
+        memcpy(tmp->time_data,  histogram_time_bins,  sizeof(hist_bin_time_t)  * ((*histogram_bins)+1));
         
         for (i = 0; i < (*histogram_bins)+1; i++) {
             tmp->total_count += tmp->count_data[i];
