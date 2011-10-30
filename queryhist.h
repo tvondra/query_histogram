@@ -19,6 +19,6 @@ typedef enum {
     HISTOGRAM_LOG
 } histogram_type_t;
 
-histogram_data * query_hist_get_data();
+histogram_data * query_hist_get_data(bool scale);
 void query_hist_reset(bool locked);
 void query_hist_refresh();

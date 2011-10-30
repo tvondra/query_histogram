@@ -444,9 +444,10 @@ void query_hist_add_query(hist_bin_time_t duration) {
     
 }
 
-histogram_data * query_hist_get_data() {
+histogram_data * query_hist_get_data(bool scale) {
     
     int i = 0;
+    double coeff = 0;
     
     histogram_data * tmp = (histogram_data *)palloc(sizeof(histogram_data));
     
@@ -464,6 +465,15 @@ histogram_data * query_hist_get_data() {
         
         memcpy(tmp->count_data, histogram_count_bins, sizeof(hist_bin_count_t) * ((*histogram_bins)+1));
         memcpy(tmp->time_data,  histogram_time_bins,  sizeof(hist_bin_time_t)  * ((*histogram_bins)+1));
+        
+        /* check if we need to scale the histogram */
+        if (scale && ((*histogram_sample_pct) < 100)) {
+            coeff = (100.0 / (*histogram_sample_pct));
+            for (i = 0; i < (*histogram_bins)+1; i++) {
+                tmp->count_data[i] = tmp->count_data[i] * coeff;
+                tmp->time_data[i]  = tmp->time_data[i] * coeff;
+            }
+        }
         
         for (i = 0; i < (*histogram_bins)+1; i++) {
             tmp->total_count += tmp->count_data[i];

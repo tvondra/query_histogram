@@ -35,8 +35,8 @@ query_histogram(PG_FUNCTION_ARGS)
         
         funcctx = SRF_FIRSTCALL_INIT();
         oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-        data = query_hist_get_data();
+        
+        data = query_hist_get_data(PG_GETARG_BOOL(0));
         
         /* init (open file, etc.), maybe read all the data in memory
          * so that the file is not kept open for a long time */
