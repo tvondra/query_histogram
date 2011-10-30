@@ -108,7 +108,7 @@ _PG_init(void)
                             100,
                             0, 1000,
                             PGC_SUSET,
-                            GUC_UNIT_MS,
+                            0,
                             NULL,
                             &set_histogram_bins_count_hook,
                             NULL);
@@ -132,7 +132,7 @@ _PG_init(void)
                             5,
                             1, 100,
                             PGC_SUSET,
-                            GUC_UNIT_MS,
+                            0,
                             NULL,
                             &set_histogram_sample_hook,
                             NULL);
