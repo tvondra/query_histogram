@@ -285,7 +285,7 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
         seconds = queryDesc->totaltime->total;
 
         /* N % 100 returns value 0-99, so we need to subtract 1 from the sample_pct */
-        if ((histogram_initialized) && (rand() % 100 < (default_histogram_sample_pct-1))) {
+        if ((histogram_initialized) && (rand() % 100 < default_histogram_sample_pct)) {
             query_hist_add_query(seconds);
         }
         
