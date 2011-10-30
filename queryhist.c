@@ -284,7 +284,8 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
         /* Log plan if duration is exceeded. */
         seconds = queryDesc->totaltime->total;
 
-        if ((histogram_initialized) && (rand() % 100 < default_histogram_sample_pct)) {
+        /* N % 100 returns value 0-99, so we need to subtract 1 from the sample_pct */
+        if ((histogram_initialized) && (rand() % 100 < (default_histogram_sample_pct-1)) {
             query_hist_add_query(seconds);
         }
         
