@@ -39,8 +39,12 @@ typedef float4        hist_bin_time_t;
  * This segment is initialized in the first process that accesses it (see
  * query_hist_init function).
  */
-#define SEGMENT_KEY   43873
-#define SEMAPHORE_KEY 43874
+
+/* used to create the shared segment (so that we can have one for each cluster) */
+extern int PostPortNumber;
+
+#define SEGMENT_KEY   (PostPortNumber+100)
+#define SEMAPHORE_KEY (PostPortNumber+101)
 
 #define HIST_BINS_MAX 1000
 
@@ -298,7 +302,9 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
     
 }
 
-/* FIXME There should be a semaphore / mutex guarding the segment. */
+/* FIXME This needs to check if the segment actually contains a histogram, as it might
+ * be a collision with another shared memory segment (another cluster or something
+ * completely different). */
 void query_hist_init() {
 
     int segment_id;
