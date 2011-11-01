@@ -427,6 +427,16 @@ void histogram_load_from_file(void) {
     
     if (memcmp(hash_file, hash_comp, 16) == 0) {
         memcpy(shared_histogram_info, buffer, sizeof(histogram_info_t));
+        
+        /* FIXME Is this necessary? */
+        shared_histogram_info->lock = LWLockAssign();
+        
+        /* copy the values from the histogram */
+        default_histogram_type = shared_histogram_info->type;
+        default_histogram_bins = shared_histogram_info->bins;
+        default_histogram_step = shared_histogram_info->step;
+        default_histogram_sample_pct = shared_histogram_info->sample_pct;
+        
         elog(DEBUG1, "successfully loaded query histogram from a file : %s",
              HISTOGRAM_DUMP_FILE);
     } else {
