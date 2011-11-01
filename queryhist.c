@@ -215,7 +215,7 @@ explain_ExecutorStart(QueryDesc *queryDesc, int eflags)
     else
         standard_ExecutorStart(queryDesc, eflags);
 
-    /* FIXME This enables */
+    /* Enable the histogram whenever the histogram is dynamic or (bins>0). */
     if (query_histogram_enabled())
     {
         /*
@@ -562,10 +562,11 @@ size_t get_histogram_size() {
     return MAXALIGN(sizeof(histogram_info_t));
 }
 
+/* The histogram is enabled when the number of bins is positive or when
+ * the histogram is dynamic (in that case we can't rely on the bins number
+ * as it may change next second). */
 static
 bool query_histogram_enabled() {
-    
-    bool enabled;
     
     /* when the histogram is static, check the number of bins (does not
      * make much sense, I guess - it's probably better to remove the
@@ -574,10 +575,6 @@ bool query_histogram_enabled() {
         return (default_histogram_bins > 0);
     }
     
-    LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
-    enabled = (shared_histogram_info->bins > 0);
-    LWLockRelease(shared_histogram_info->lock);
-    
-    return enabled;
+    return true;
     
 }
