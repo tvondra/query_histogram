@@ -4,8 +4,8 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "queryhist.h"
 #include "postgres.h"
+#include "queryhist.h"
 #include "fmgr.h"
 
 #include "funcapi.h"
@@ -133,12 +133,5 @@ Datum
 query_histogram_reset(PG_FUNCTION_ARGS)
 {
     query_hist_reset(false);
-    PG_RETURN_VOID();
-}
-
-Datum
-query_histogram_refresh(PG_FUNCTION_ARGS)
-{
-    query_hist_refresh();
     PG_RETURN_VOID();
 }

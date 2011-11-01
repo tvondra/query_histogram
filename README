@@ -13,7 +13,8 @@ minimize this issue, you may sample only some of the queries (see the
 sample_pct GUC option).
 
 Most of the code that interacts directly with the executor comes from
-the auto_explain extension (hooks, etc).
+the auto_explain and pg_stat_statements extensions (hooks, shared
+memory management etc).
 
 
 Install
@@ -32,13 +33,75 @@ by running the SQL script (query_histogram--x.y.sql) in the database. If
 needed, replace MODULE_PATHNAME by $libdir.
 
 
-Usage
------
-There are three functions that you can use to work with the histogram.
+Config
+------
+No the functions are created, but you still need to load the shared
+module. This needs to be done from postgresql.conf, as the module
+needs to allocate space in the shared memory segment. So add this to
+the config file (or update the current values)
+
+   # libraries to load
+   shared_preload_libraries = 'query_histogram'
+
+   # known GUC prefixes
+   custom_variable_classes = 'query_histogram'
+
+   # config of the query histogram
+   query_histogram.sample_pct = 5
+   query_histogram.bin_width = 10
+   query_histogram.bin_count = 1000
+   query_histogram.dynamic = true
+
+The meaning of those config options is this:
+
+  (a) query_histogram.sample_pct - sampling rate, i.e. how many
+      queries will be actually inserted into the histogram (this
+      involves locking, so you may use lower values to limit the
+      impact if this is a problem)
+
+  (b) query_histogram.bin_count - number of bins (0-1000), 0 means
+      the histogram is disabled (still, the hooks are installed
+      so there is some overhead - if you don't need the histogram
+      remove it from shared_preload_libraries)
+
+  (c) query_histogram.bin_width - width of each bin (in miliseconds)
+
+  (d) query_histogram.dynamic - if you set this to false, then you
+      won't be able to dynamically change the histogram options
+      (number of bins, sampling rate etc.) set in the config file
+
+When you set the histogram to dynamic=true, you may change the
+histogram on the fly, but it adds overhead because whenever you need
+to access the sample_pct, it has to be loaded from the shared segment.
+So the segment has to be locked etc.
+
+Again, this is an option that allows you to reduce the overhead. If
+you're afraid the overhead might be an issue, use dynamic=false and
+low sample_pct (e.g. 5).
+
+If you prefer flexibility and exact overview of the queries, use high
+sample_pct (even 100) and dynamic=true (so that you may reconfigure
+the queries using SET commands).
+
+So if you want a histogram with 100 bins, each bin 1 second wide, and
+you've set 'dynamic=true', you may do this
+
+  db=# SET query_histogram.bin_count = 100;
+  db=# SET query_histogram.bin_width = 1000;
+
+And if you want to sample just 1% of the queries, you may do this
+
+  db=# SET query_histogram.sample_pct = 1;
+
+You can't change the 'dynamic' option (except directly in the file).
+
+
+Reading the histogram data
+--------------------------
+There are two functions that you can use to work with the histogram.
 
   1) query_histogram()        - get data
   2) query_histogram_reset()  - reset data, start collecting again
-  3) uery_histogram_refresh() - get sample rate (set by other backend)
 
 The first one is the most important one, as it allows you to read the
 current histogram data - just use it as a table:
@@ -61,42 +124,3 @@ The columns of the result are rather obvious:
 The second function may be handy if you need to reset the histogram and
 start collecting again (for example you may collect the stats regularly
 and reset it).
-
-The last function is related to the shared memory segment - all important
-parameters (number of bins, width and sample rate) are stored at the
-beginning of the shared segment. As all access to the segment has to be
-guarded by a lock, there is a local copy of the sample_pct and it's
-refreshed only when the segment is locked for some other reason, e.g.
-whenever a query is actually added to the histogram or when you reconnect.
-Or you may force it by calling query_histogram_refresh().
-
-But if you don't change the sample_pct (which is probably the case), or
-if you don't mind that the other backends are using a stale value for a
-while, you don't need to care about this function.
-
-
-Config
-------
-There are three things you may configure on the histogram - number of
-bins, width of the bins and sample rate. There are three GUC for this.
-
-  query_histogram.bin_count - number of bins (0-1000), 0 means the
-                              histogram is disabled
-
-  query_histogram.bin_width - width of each bin (in miliseconds)
-
-  query_histogram.sample_pct - sampling rate, i.e. what portion of
-                               queries will actually be stored in the
-                               histogram, e.g. 5 means 5%
-                                 
-So if you want a histogram with 100 bins, each bin 1 second wide, you
-may do this
-
-  db=# SET query_histogram.bin_count = 100; /* 100 bins */
-  db=# SET query_histogram.bin_width = 1000; /* each 1000 ms wide */
-
-And if you want to sample just 1% of the queries, you may do this
-
-  db=# SET query_histogram.sample_pct = 1; /* sample just 1% */
-
-That's all.

@@ -5,14 +5,17 @@
 
 #include <sys/types.h>
 #include <sys/ipc.h>
-#include <sys/sem.h>
 
 #include "postgres.h"
-#include "queryhist.h"
+#include "miscadmin.h"
+#include "storage/ipc.h"
 
 #include "commands/explain.h"
+#include "executor/executor.h"
 #include "executor/instrument.h"
 #include "utils/guc.h"
+
+#include "queryhist.h"
 
 static const struct config_enum_entry histogram_type_options[] = {
     {"linear", HISTOGRAM_LINEAR, false},
@@ -22,64 +25,49 @@ static const struct config_enum_entry histogram_type_options[] = {
 
 static int nesting_level = 0;
 
-typedef unsigned long hist_bin_count_t;
-typedef float4        hist_bin_time_t;
-
-/* The histogram itself is stored in a shared memory segment
- * with this layout
- * 
- * - users (int => 4B)
- * - bins (int => 4B)
- * - step (int => 4B)
- * - type (int => 4B)
- * - sample (int => 4B)
- * - count bins (HIST_BINS_MAX+1) x sizeof(unsigned long)
- * - time  bins (HIST_BINS_MAX+1) x sizeof(unsigned long)
- * 
- * This segment is initialized in the first process that accesses it (see
- * query_hist_init function).
- */
-
-/* used to create the shared segment (so that we can have one for each cluster) */
-extern int PostPortNumber;
-
-#define SEGMENT_KEY   (PostPortNumber+100)
-#define SEMAPHORE_KEY (PostPortNumber+101)
-
-#define HIST_BINS_MAX 1000
-
-static bool  histogram_initialized = FALSE;
-static int * histogram_users;
-static int * histogram_bins;
-static int * histogram_step;
-static histogram_type_t * histogram_type;
-static int * histogram_sample_pct;
-
-/* default values */
-static int default_histogram_bins = 100;
-static int default_histogram_step = 100;
-static int default_histogram_sample_pct = 5;
-static int default_histogram_type = HISTOGRAM_LINEAR;
-
-static hist_bin_count_t * histogram_count_bins;
-static hist_bin_time_t * histogram_time_bins;
-
-/* semaphore used to sync access to the shared segment */
-static int semaphore_id;
-
-#define query_histogram_enabled() \
-    ((histogram_initialized) && (nesting_level == 0) && ((*histogram_bins) > 0))
-
-/* Saved hook values in case of unload */
-static ExecutorStart_hook_type prev_ExecutorStart = NULL;
-static ExecutorRun_hook_type prev_ExecutorRun = NULL;
-static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
-static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
+/* private functions */
+static void histogram_shmem_startup(void);
+static void histogram_shmem_shutdown(int code, Datum arg);
 
 static void set_histogram_bins_count_hook(int newval, void *extra);
 static void set_histogram_bins_width_hook(int newval, void *extra);
 static void set_histogram_sample_hook(int newval, void *extra);
 static void set_histogram_type_hook(int newval, void *extra);
+
+static void query_hist_add_query(time_bin_t duration);
+static bool query_histogram_enabled(void);
+
+static size_t get_histogram_size(void);
+
+/* The histogram itself is stored in a shared memory segment
+ * with this layout (see the histogram_info_t below).
+ * 
+ * - bins (int => 4B)
+ * - step (int => 4B)
+ * - type (int => 4B)
+ * - sample (int => 4B)
+ * 
+ * - count bins (HIST_BINS_MAX+1) x sizeof(unsigned long)
+ * - time  bins (HIST_BINS_MAX+1) x sizeof(unsigned long)
+ * 
+ * This segment is initialized in the first process that accesses it (see
+ * histogram_shmem_startup function).
+ */
+#define SEGMENT_NAME    "query_histogram"
+
+/* default values (used for init) */
+static bool default_histogram_dynamic = false;
+static int  default_histogram_bins = 100;
+static int  default_histogram_step = 100;
+static int  default_histogram_sample_pct = 5;
+static int  default_histogram_type = HISTOGRAM_LINEAR;
+
+/* Saved hook values in case of unload */
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+static ExecutorStart_hook_type prev_ExecutorStart = NULL;
+static ExecutorRun_hook_type prev_ExecutorRun = NULL;
+static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
+static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 
 void        _PG_init(void);
 void        _PG_fini(void);
@@ -91,12 +79,8 @@ static void explain_ExecutorRun(QueryDesc *queryDesc,
 static void explain_ExecutorFinish(QueryDesc *queryDesc);
 static void explain_ExecutorEnd(QueryDesc *queryDesc);
 
-/* private functions */
-void query_hist_init();
-void query_hist_add_query(hist_bin_time_t duration);
-
-void semaphore_lock();
-void semaphore_unlock();
+/* the whole histogram (info and data) */
+static histogram_info_t * shared_histogram_info = NULL;
 
 /*
  * Module load callback
@@ -104,7 +88,23 @@ void semaphore_unlock();
 void
 _PG_init(void)
 {
+    
+    /* */
+    if (!process_shared_preload_libraries_in_progress)
+        return;
+    
     /* Define custom GUC variables. */
+    DefineCustomBoolVariable("query_histogram.dynamic",
+                              "Dynamic histogram may be modified on the fly.",
+                             NULL,
+                             &default_histogram_dynamic,
+                             false,
+                             PGC_BACKEND,
+                             0,
+                             NULL,
+                             NULL,
+                             NULL);
+    
     DefineCustomIntVariable("query_histogram.bin_count",
                          "Sets the number of bins of the histogram.",
                          "Zero disables collecting the histogram.",
@@ -154,8 +154,19 @@ _PG_init(void)
                              NULL);
 
     EmitWarningsOnPlaceholders("query_histogram");
+    
+    /*
+     * Request additional shared resources.  (These are no-ops if we're not in
+     * the postmaster process.)  We'll allocate or attach to the shared
+     * resources in histogram_shmem_startup().
+     */
+    RequestAddinShmemSpace(get_histogram_size());
+    RequestAddinLWLocks(1);
 
     /* Install hooks. */
+    prev_shmem_startup_hook = shmem_startup_hook;
+    shmem_startup_hook = histogram_shmem_startup;
+    
     prev_ExecutorStart = ExecutorStart_hook;
     ExecutorStart_hook = explain_ExecutorStart;
     prev_ExecutorRun = ExecutorRun_hook;
@@ -164,9 +175,6 @@ _PG_init(void)
     ExecutorFinish_hook = explain_ExecutorFinish;
     prev_ExecutorEnd = ExecutorEnd_hook;
     ExecutorEnd_hook = explain_ExecutorEnd;
-    
-    /* FIXME reference the proper GUC default values somehow */
-    query_hist_init();
     
 }
 
@@ -182,14 +190,7 @@ _PG_fini(void)
     ExecutorRun_hook = prev_ExecutorRun;
     ExecutorFinish_hook = prev_ExecutorFinish;
     ExecutorEnd_hook = prev_ExecutorEnd;
-    
-    /* FIXME I can't mark the segment as "deletable" as it would cause
-     * occasional data loss (the OS could remove the histogram segment).
-     * Anyway it's just 8kB of data, so it's not a big issue.
-     */
-    if (histogram_initialized) {
-        --(*histogram_users);
-    }
+    shmem_startup_hook = prev_shmem_startup_hook;
 }
 
 /*
@@ -204,6 +205,7 @@ explain_ExecutorStart(QueryDesc *queryDesc, int eflags)
     else
         standard_ExecutorStart(queryDesc, eflags);
 
+    /* FIXME This enables */
     if (query_histogram_enabled())
     {
         /*
@@ -274,8 +276,7 @@ explain_ExecutorFinish(QueryDesc *queryDesc)
 static void
 explain_ExecutorEnd(QueryDesc *queryDesc)
 {
-    
-    if (queryDesc->totaltime && query_histogram_enabled())
+    if (queryDesc->totaltime && (nesting_level == 0) && query_histogram_enabled())
     {
         float seconds;
         
@@ -288,9 +289,29 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
         /* Log plan if duration is exceeded. */
         seconds = queryDesc->totaltime->total;
 
-        /* N % 100 returns value 0-99, so we need to subtract 1 from the sample_pct */
-        if ((histogram_initialized) && (rand() % 100 < default_histogram_sample_pct)) {
-            query_hist_add_query(seconds);
+        /* is the histogram static or dynamic? */
+        if (! default_histogram_dynamic) {
+            
+            /* in case of static histogram, it's quite simple - check the number
+             * of bins and a sample rate - then lock the segment, add the query
+             * and unlock it again */
+            if ((default_histogram_bins > 0) && (rand() % 100 <  default_histogram_sample_pct)) {
+                LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+                query_hist_add_query(seconds);
+                LWLockRelease(shared_histogram_info->lock);
+            }
+            
+        } else {            
+            /* when the histogram is dynamic, we have to lock it first, as we
+             * will access the sample_pct in the histogram */
+            LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
+            if ((shared_histogram_info->bins > 0) && (rand() % 100 <  shared_histogram_info->sample_pct)) {
+                LWLockRelease(shared_histogram_info->lock);
+                LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+                query_hist_add_query(seconds);
+            }
+            LWLockRelease(shared_histogram_info->lock);
+            
         }
         
     }
@@ -302,155 +323,103 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
     
 }
 
-/* FIXME This needs to check if the segment actually contains a histogram, as it might
- * be a collision with another shared memory segment (another cluster or something
- * completely different). */
-void query_hist_init() {
+/* This is probably the most important part - allocates the shared 
+ * segment, initializes it etc. */
+static
+void histogram_shmem_startup() {
 
-    int segment_id;
-    int required_size;
-    char * data;
-    bool created = FALSE;
+    bool found = FALSE;
     
-    /* initialize semaphore */
-    semaphore_id = semget(SEMAPHORE_KEY, 1, IPC_CREAT);
+    elog(NOTICE, "initializing shared memory segment");
     
-    if (semaphore_id == -1) {
-        /* not sure if this is enough - maybe it will crash later or something */
-        elog(ERROR, "semaphore for histogram synchronization not created");
-        return;
-    }
+    if (prev_shmem_startup_hook)
+        prev_shmem_startup_hook();
     
-    /* initialize shared memory segment */
-    required_size = 5*sizeof(int) + (HIST_BINS_MAX+1) * sizeof(hist_bin_count_t) + (HIST_BINS_MAX+1) * sizeof(hist_bin_time_t);
+    /*
+     * Create or attach to the shared memory state, including hash table
+     */
+    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+    shared_histogram_info = ShmemInitStruct(SEGMENT_NAME,
+                    sizeof(histogram_info_t),
+                    &found);
     
-    elog(DEBUG1, "initializing histogram segment (size: %d B)", required_size);
-    
-    /* lock the semaphore */
-    semaphore_lock();
-    
-    /* check if there's an existing segment */
-    segment_id = shmget(SEGMENT_KEY, required_size, S_IRUSR | S_IWUSR);
-    if (segment_id == -1) {
+    elog(DEBUG1, "initializing query histogram segment (size: %d B)", sizeof(histogram_info_t));
+
+    if (! found) {
         
-        /* try to create a new segment */
-        segment_id = shmget(SEGMENT_KEY, required_size, IPC_CREAT | S_IRUSR | S_IWUSR);
-        if (segment_id == -1) {
-            /* not sure if this is enough - maybe it will crash later or something */
-            elog(ERROR, "shared memory segment (histogram) not allocated");
-            return;
-        }
+        /* First time through ... */
+        shared_histogram_info->lock = LWLockAssign();
         
-        elog(DEBUG1, "shared memory segment (histogram) %d successfully created", SEGMENT_KEY);
-        created = TRUE;
+        shared_histogram_info->type = default_histogram_type;
+        shared_histogram_info->bins = default_histogram_bins;
+        shared_histogram_info->step = default_histogram_step;
+        shared_histogram_info->sample_pct = default_histogram_sample_pct;
+        
+        memset(shared_histogram_info->count_bins, 0, (HIST_BINS_MAX+1)*sizeof(count_bin_t));
+        memset(shared_histogram_info->time_bins,  0, (HIST_BINS_MAX+1)*sizeof(time_bin_t));
+        
+        elog(DEBUG1, "shared memory segment (query histogram) successfully created");
         
     }
-    
-    /* there should be a segment existing, try to attach it */
-    data = (char*)shmat(segment_id, 0, 0);
-    
-    if (data == (void*)-1) {
-        elog(ERROR, "shared memory segment (histogram) %d not attached", SEGMENT_KEY);
-        return;
-    }
-    
-    elog(DEBUG1, "shared memory segment (histogram) successfully attached");
-    
-    /* set the users/bins/step/sample properly */
-    histogram_users = (int*)data;
-    histogram_bins  = (int*)(data + sizeof(int));
-    histogram_step  = (int*)(data + 2*sizeof(int));
-    histogram_type  = (histogram_type_t*)(data + 3*sizeof(int));
-    histogram_sample_pct = (int*)(data + 3*sizeof(int) + sizeof(histogram_type_t));
-    
-    histogram_count_bins = (hist_bin_count_t*)(data + 4*sizeof(int) + sizeof(histogram_type_t));
-    histogram_time_bins  =  (hist_bin_time_t*)(data + 4*sizeof(int) + sizeof(histogram_type_t) + (HIST_BINS_MAX+1)*sizeof(hist_bin_count_t));
-    
-    /* increase the histogram users count */
-    ++(*histogram_users);
 
-    /* reset the histogram (set to zeroes), */
-    if (created) {
-        query_hist_reset(true);
-    } else {
-        default_histogram_bins = (*histogram_bins);
-        default_histogram_step = (*histogram_step);
-        default_histogram_sample_pct = (*histogram_sample_pct);
-    }
-    
-    /* increase the number or users */
-    ++(*histogram_users);
-    
-    /* init done, unlock the semaphore */
-    semaphore_unlock();
-    
-    /* initialized successfully */
-    histogram_initialized = TRUE;
+    LWLockRelease(AddinShmemInitLock);
 
+    /*
+     * If we're in the postmaster (or a standalone backend...), set up a shmem
+     * exit hook to dump the statistics to disk.
+     */
+    if (!IsUnderPostmaster)
+        on_shmem_exit(histogram_shmem_shutdown, (Datum) 0);
+   
     /* seed the random generator */
-    srand(SEGMENT_KEY);
+    // srand((int)shared_histogram_info);
     
 }
 
+/* FIXME This might dump the data into a file or something like that. */
+static
+void histogram_shmem_shutdown(int code, Datum arg) {
+    return;
+}
+
+/* need an exclusive lock to modify the histogram */
 void query_hist_reset(bool locked) {
     
-    if (histogram_initialized) {
-        
-        if (! locked) { semaphore_lock(); }
-    
-        (*histogram_bins) = default_histogram_bins;
-        (*histogram_step) = default_histogram_step;
-        (*histogram_sample_pct) = default_histogram_sample_pct;
-        (*histogram_type) = default_histogram_type;
-        
-        memset(histogram_count_bins, 0, (HIST_BINS_MAX+1)*sizeof(hist_bin_count_t));
-        memset(histogram_time_bins,  0, (HIST_BINS_MAX+1)*sizeof(hist_bin_time_t));
-        
-        if (! locked) { semaphore_unlock(); }
-        
+    if (! shared_histogram_info) {
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("query_histogram must be loaded via shared_preload_libraries")));
     }
     
-}
-
-void query_hist_refresh() {
-    
-    if (histogram_initialized) {
-        
-        semaphore_lock();
-    
-        default_histogram_bins = (*histogram_bins);
-        default_histogram_step = (*histogram_step);
-        default_histogram_sample_pct = (*histogram_sample_pct);
-        default_histogram_type = (*histogram_type);
-        
-        semaphore_unlock();
-        
+    if (! locked) {
+        LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
     }
     
+    memset(shared_histogram_info->count_bins, 0, (HIST_BINS_MAX+1)*sizeof(count_bin_t));
+    memset(shared_histogram_info->time_bins,  0, (HIST_BINS_MAX+1)*sizeof(time_bin_t));
+    
+    /* if it was not locked before, we can release the lock now */
+    if (! locked) {
+        LWLockRelease(shared_histogram_info->lock);
+    }
+
 }
 
-void query_hist_add_query(hist_bin_time_t duration) {
+/* needs to be already locked */
+static
+void query_hist_add_query(time_bin_t duration) {
     
     int bin;
     
-    semaphore_lock();
-    
-    /* refresh the local variables */
-    default_histogram_bins = (*histogram_bins);
-    default_histogram_step = (*histogram_step);
-    default_histogram_sample_pct = (*histogram_sample_pct);
-    default_histogram_type = (*histogram_type);
-    
-    bin = (int)ceil(duration * 1000.0) / default_histogram_step;
+    bin = (int)ceil(duration * 1000.0) / (shared_histogram_info->step);
     
     /* queries that take longer than the last bin should go to
      * the (HIST_BINS_MAX+1) bin */
-    bin = (bin >= default_histogram_bins) ? default_histogram_bins : bin;
+    bin = (bin >= (shared_histogram_info->bins)) ? (shared_histogram_info->bins) : bin;
     
-    histogram_count_bins[bin] += 1;
-    histogram_time_bins[bin] += duration;
-    
-    semaphore_unlock();
+    shared_histogram_info->count_bins[bin] += 1;
+    shared_histogram_info->time_bins[bin] += duration;
     
 }
 
@@ -458,130 +427,147 @@ histogram_data * query_hist_get_data(bool scale) {
     
     int i = 0;
     double coeff = 0;
+    histogram_data * tmp = NULL;
     
-    histogram_data * tmp = (histogram_data *)palloc(sizeof(histogram_data));
+    if (! shared_histogram_info) {
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("query_histogram must be loaded via shared_preload_libraries")));
+    }
+    
+    tmp = (histogram_data *)palloc(sizeof(histogram_data));
     
     memset(tmp, 0, sizeof(histogram_data));
     
-    semaphore_lock();
+    /* we can do this using a shared lock */
+    LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
 
-    tmp->bins_count = (*histogram_bins);
-    tmp->bins_width = (*histogram_step);
+    tmp->bins_count = (shared_histogram_info->bins);
+    tmp->bins_width = (shared_histogram_info->step);
     
-    if ((*histogram_bins) > 0) {
+    if (shared_histogram_info->bins > 0) {
     
-        tmp->count_data = (hist_bin_count_t *) palloc(sizeof(hist_bin_count_t) * ((*histogram_bins)+1));
-        tmp->time_data  =  (hist_bin_time_t *) palloc(sizeof(hist_bin_time_t)  * ((*histogram_bins)+1));
+        tmp->count_data = (count_bin_t *) palloc(sizeof(count_bin_t) * (shared_histogram_info->bins+1));
+        tmp->time_data  =  (time_bin_t *) palloc(sizeof(time_bin_t)  * (shared_histogram_info->bins+1));
         
-        memcpy(tmp->count_data, histogram_count_bins, sizeof(hist_bin_count_t) * ((*histogram_bins)+1));
-        memcpy(tmp->time_data,  histogram_time_bins,  sizeof(hist_bin_time_t)  * ((*histogram_bins)+1));
+        memcpy(tmp->count_data, shared_histogram_info->count_bins, sizeof(count_bin_t) * (shared_histogram_info->bins+1));
+        memcpy(tmp->time_data,  shared_histogram_info->time_bins,  sizeof(time_bin_t)  * (shared_histogram_info->bins+1));
         
         /* check if we need to scale the histogram */
-        if (scale && ((*histogram_sample_pct) < 100)) {
-            coeff = (100.0 / (*histogram_sample_pct));
-            for (i = 0; i < (*histogram_bins)+1; i++) {
+        if (scale && (shared_histogram_info->sample_pct < 100)) {
+            coeff = (100.0 / (shared_histogram_info->sample_pct));
+            for (i = 0; i < (shared_histogram_info->bins+1); i++) {
                 tmp->count_data[i] = tmp->count_data[i] * coeff;
                 tmp->time_data[i]  = tmp->time_data[i] * coeff;
             }
         }
         
-        for (i = 0; i < (*histogram_bins)+1; i++) {
+        for (i = 0; i < (shared_histogram_info->bins+1); i++) {
             tmp->total_count += tmp->count_data[i];
             tmp->total_time  += tmp->time_data[i];
         }
         
     }
     
-    semaphore_unlock();
+    /* release the lock */
+    LWLockRelease(shared_histogram_info->lock);
 
     return tmp;
 
 }
 
-static
 void set_histogram_bins_count_hook(int newval, void *extra) {
     
-    default_histogram_bins = newval;
-
-    if (histogram_initialized) {
-        semaphore_lock();
-        default_histogram_step = (*histogram_step);
-        default_histogram_sample_pct = (*histogram_sample_pct);
-        default_histogram_type = (*histogram_type);
-        semaphore_unlock();
+    if (! default_histogram_dynamic) {
+        elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
+                      "it's not possible to change the bins/width/sample/type.");
+        return;
     }
     
-    query_hist_reset(false);
+    if (shared_histogram_info) {
+        LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+        shared_histogram_info->bins = newval;
+        query_hist_reset(true);
+        LWLockRelease(shared_histogram_info->lock);
+    }
     
 }
 
 static
 void set_histogram_bins_width_hook(int newval, void *extra) {
-    default_histogram_step = newval;
     
-    if (histogram_initialized) {
-        semaphore_lock();
-        default_histogram_bins = (*histogram_bins);
-        default_histogram_sample_pct = (*histogram_sample_pct);
-        default_histogram_type = (*histogram_type);
-        semaphore_unlock();
+    if (! default_histogram_dynamic) {
+        elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
+                      "it's not possible to change the bins/width/sample/type.");
+        return;
     }
     
-    query_hist_reset(false);
+    if (shared_histogram_info) {
+        LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+        shared_histogram_info->step = newval;
+        query_hist_reset(true);
+        LWLockRelease(shared_histogram_info->lock);
+    }
+    
 }
 
 static
 void set_histogram_sample_hook(int newval, void *extra) {
     
-    default_histogram_sample_pct = newval;
-    
-    if (histogram_initialized) {
-        semaphore_lock();
-        default_histogram_bins = (*histogram_bins);
-        default_histogram_step = (*histogram_step);
-        default_histogram_type = (*histogram_type);
-        semaphore_unlock();
+    if (! default_histogram_dynamic) {
+        elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
+                      "it's not possible to change the bins/width/sample/type.");
+        return;
     }
-
-    query_hist_reset(false);
+    
+    if (shared_histogram_info) {
+        LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+        shared_histogram_info->sample_pct = newval;
+        query_hist_reset(true);
+        LWLockRelease(shared_histogram_info->lock);
+    }
+    
 }
 
 static
 void set_histogram_type_hook(int newval, void *extra) {
     
-    default_histogram_type = newval;
-    
-    if (histogram_initialized) {
-        semaphore_lock();
-        default_histogram_bins = (*histogram_bins);
-        default_histogram_step = (*histogram_step);
-        default_histogram_sample_pct = (*histogram_sample_pct);
-        semaphore_unlock();
+    if (! default_histogram_dynamic) {
+        elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
+                      "it's not possible to change the bins/width/sample/type.");
+        return;
     }
     
-    query_hist_reset(false);
-}
-
-void semaphore_lock() {
-    
-    struct sembuf operations[1];
-    
-    operations[0].sem_num = 0;
-    operations[0].sem_op = -1;
-    operations[0].sem_flg = SEM_UNDO;
-    
-    semop (semaphore_id, operations, 1);
+    if (shared_histogram_info) {
+        LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+        shared_histogram_info->type = newval;
+        query_hist_reset(true);
+        LWLockRelease(shared_histogram_info->lock);
+    }
     
 }
 
-void semaphore_unlock() {
+static
+size_t get_histogram_size() {
+    return MAXALIGN(sizeof(histogram_info_t));
+}
+
+static
+bool query_histogram_enabled() {
     
-    struct sembuf operations[1];
-
-    operations[0].sem_num = 0;
-    operations[0].sem_op = 1;
-    operations[0].sem_flg = SEM_UNDO;
-
-    semop (semaphore_id, operations, 1);
-
+    bool enabled;
+    
+    /* when the histogram is static, check the number of bins (does not
+     * make much sense, I guess - it's probably better to remove the
+     * library from the config altogether than just setting 0). */
+    if (! default_histogram_dynamic) {
+        return (default_histogram_bins > 0);
+    }
+    
+    LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
+    enabled = (shared_histogram_info->bins > 0);
+    LWLockRelease(shared_histogram_info->lock);
+    
+    return enabled;
+    
 }
