@@ -6,6 +6,7 @@
  *      bin_count is actually the only possible size). */
 /* 1000 bins ought be enough for anyone */
 #define HIST_BINS_MAX 1000
+#define HISTOGRAM_DUMP_FILE "global/query_histogram.stat"
 
 /* How are the histogram bins scaled? */
 typedef enum {

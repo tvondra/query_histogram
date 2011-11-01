@@ -9,11 +9,14 @@
 #include "postgres.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
+#include "storage/fd.h"
 
 #include "commands/explain.h"
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "utils/guc.h"
+
+#include "libpq/md5.h"
 
 #include "queryhist.h"
 
@@ -28,6 +31,8 @@ static int nesting_level = 0;
 /* private functions */
 static void histogram_shmem_startup(void);
 static void histogram_shmem_shutdown(int code, Datum arg);
+
+static void histogram_load_from_file(void);
 
 static void set_histogram_bins_count_hook(int newval, void *extra);
 static void set_histogram_bins_width_hook(int newval, void *extra);
@@ -340,8 +345,6 @@ void histogram_shmem_startup() {
 
     bool found = FALSE;
     
-    elog(NOTICE, "initializing shared memory segment");
-    
     if (prev_shmem_startup_hook)
         prev_shmem_startup_hook();
     
@@ -381,16 +384,105 @@ void histogram_shmem_startup() {
      */
     if (!IsUnderPostmaster)
         on_shmem_exit(histogram_shmem_shutdown, (Datum) 0);
+
+    if (! found)
+        histogram_load_from_file();
    
     /* seed the random generator */
     // srand((int)shared_histogram_info);
     
 }
 
-/* FIXME This might dump the data into a file or something like that. */
+/* Loads the histogram data from a file (and checks that the md5 hash of the contents matches). */
+static
+void histogram_load_from_file(void) {
+    
+    FILE * file;
+    char hash_file[16];
+    char hash_comp[16];
+    char * buffer;
+    
+    /* load the histogram from the file */
+    file = AllocateFile(HISTOGRAM_DUMP_FILE, PG_BINARY_R);
+    
+    if ((file == NULL) && (errno == ENOENT)) {
+        elog(DEBUG1, "file with the histogram does not exist");
+        return;
+    } else if (file == NULL) {
+        goto error;
+    }
+    
+    /* read the first 16 bytes (should be a MD5 hash of the segment) */
+    if (fread(hash_file, 16, 1, file) != 1)
+        goto error;
+    
+    /* read the histogram (into buffer) */
+    buffer = palloc(sizeof(histogram_info_t));
+    if (fread(buffer, sizeof(histogram_info_t), 1, file) != 1)
+        goto error;
+    
+    /* compute md5 hash of the buffer */
+    pg_md5_binary(buffer, sizeof(histogram_info_t), hash_comp);
+    
+    if (memcmp(hash_file, hash_comp, 16) == 0) {
+        memcpy(shared_histogram_info, buffer, sizeof(histogram_info_t));
+        elog(DEBUG1, "successfully loaded query histogram from a file : %s",
+             HISTOGRAM_DUMP_FILE);
+    } else {
+        elog(NOTICE, "hashes do not match");
+    }
+    
+    FreeFile(file);
+    pfree(buffer);
+
+    return;
+
+error: /* error handling */
+    ereport(LOG,
+            (errcode_for_file_access(),
+             errmsg("could not read query_histogram file \"%s\": %m",
+                    HISTOGRAM_DUMP_FILE)));
+    if (buffer)
+        pfree(buffer);
+    if (file)
+        FreeFile(file);
+
+}
+
+/* Dumps the histogram data into a file (with a md5 hash of the contents at the beginning). */
 static
 void histogram_shmem_shutdown(int code, Datum arg) {
+    
+    FILE * file;
+    char buffer[16];
+    
+    file = AllocateFile(HISTOGRAM_DUMP_FILE, PG_BINARY_W);
+    if (file == NULL)
+        goto error;
+    
+    /* lets compute MD5 hash of the shared memory segment and write it to
+     * the beginning of the file */
+    pg_md5_binary(shared_histogram_info, sizeof(histogram_info_t), buffer);
+    
+    if (fwrite(buffer, 16, 1, file) != 1)
+        goto error;
+    
+    /* now write the actual shared segment */
+    if (fwrite(shared_histogram_info, sizeof(histogram_info_t), 1, file) != 1)
+        goto error;
+    
+    FreeFile(file);
+    
     return;
+
+error:
+    ereport(LOG,
+            (errcode_for_file_access(),
+             errmsg("could not write query histogram file \"%s\": %m",
+                    HISTOGRAM_DUMP_FILE)));
+    if (file)
+        FreeFile(file);
+    
 }
 
 /* need an exclusive lock to modify the histogram */
