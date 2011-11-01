@@ -369,6 +369,7 @@ void histogram_shmem_startup() {
         shared_histogram_info->bins = default_histogram_bins;
         shared_histogram_info->step = default_histogram_step;
         shared_histogram_info->sample_pct = default_histogram_sample_pct;
+        shared_histogram_info->last_reset = GetCurrentTimestamp();
         
         memset(shared_histogram_info->count_bins, 0, (HIST_BINS_MAX+1)*sizeof(count_bin_t));
         memset(shared_histogram_info->time_bins,  0, (HIST_BINS_MAX+1)*sizeof(time_bin_t));
@@ -534,6 +535,8 @@ void query_hist_reset(bool locked) {
     memset(shared_histogram_info->count_bins, 0, (HIST_BINS_MAX+1)*sizeof(count_bin_t));
     memset(shared_histogram_info->time_bins,  0, (HIST_BINS_MAX+1)*sizeof(time_bin_t));
     
+    shared_histogram_info->last_reset = GetCurrentTimestamp();
+    
     /* if it was not locked before, we can release the lock now */
     if (! locked) {
         LWLockRelease(shared_histogram_info->lock);
@@ -566,6 +569,24 @@ static int get_hist_bin(int bins, int step, time_bin_t duration) {
      * the (HIST_BINS_MAX+1) bin */
     return (bin >= (shared_histogram_info->bins)) ? (shared_histogram_info->bins) : bin;
     
+}
+
+TimestampTz  get_hist_last_reset() {
+    
+    TimestampTz  timestamp;
+    
+    if (! shared_histogram_info) {
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("query_histogram must be loaded via shared_preload_libraries")));
+    }
+    
+    LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
+    timestamp = shared_histogram_info->last_reset;
+    LWLockRelease(shared_histogram_info->lock);
+    
+    return timestamp;
+
 }
 
 histogram_data * query_hist_get_data(bool scale) {

@@ -1,5 +1,6 @@
 #include "postgres.h"
 #include "tcop/utility.h"
+#include "utils/timestamp.h"
 
 /* TODO When the histogram is static (dynamic=0), we may actually
  *      use less memory because the use can't resize it (so the
@@ -42,6 +43,9 @@ typedef struct histogram_info_t {
     /* lock guarding the histogram */
     LWLockId    lock; 
     
+    /* last histogram reset time */
+    TimestampTz  last_reset;
+    
     /* basic info (number of bins, step (bin width),
      * number of bins, sampling rate */
     int  type;
@@ -57,3 +61,4 @@ typedef struct histogram_info_t {
 
 histogram_data * query_hist_get_data(bool scale);
 void query_hist_reset(bool locked);
+TimestampTz get_hist_last_reset(void);
