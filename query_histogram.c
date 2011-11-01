@@ -86,13 +86,31 @@ query_histogram(PG_FUNCTION_ARGS)
         
         memset(nulls, 0, sizeof(nulls));
         
-        values[0] = UInt32GetDatum(binIdx * data->bins_width);
+        if (data->histogram_type == HISTOGRAM_LINEAR) {
         
-        if (funcctx->max_calls - 1 == funcctx->call_cntr) {
-            values[1] = UInt32GetDatum(0);
-            nulls[1] = TRUE;
+            values[0] = UInt32GetDatum(binIdx * data->bins_width);
+            
+            if (funcctx->max_calls - 1 == funcctx->call_cntr) {
+                values[1] = UInt32GetDatum(0);
+                nulls[1] = TRUE;
+            } else {
+                values[1] = UInt32GetDatum((binIdx+1)* data->bins_width);
+            }
         } else {
-            values[1] = UInt32GetDatum((binIdx+1)* data->bins_width);
+        
+            if (funcctx->call_cntr == 0) {
+                values[0] = UInt32GetDatum(0);
+            } else {
+                values[0] = UInt32GetDatum(pow(2,binIdx-1) * data->bins_width);
+            }
+            
+            if (funcctx->max_calls - 1 == funcctx->call_cntr) {
+                values[1] = UInt32GetDatum(0);
+                nulls[1] = TRUE;
+            } else {
+                values[1] = UInt32GetDatum(pow(2,binIdx) * data->bins_width);
+            }
+            
         }
         
         values[2] = UInt32GetDatum(data->count_data[binIdx]);

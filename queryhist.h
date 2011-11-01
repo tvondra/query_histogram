@@ -21,6 +21,8 @@ typedef float4        time_bin_t;
 
 /* used to transfer the data to the SRF */
 typedef struct histogram_data {
+    
+    int histogram_type;
 
     unsigned int bins_count;
     unsigned int bins_width;

@@ -41,6 +41,7 @@ static void set_histogram_type_hook(int newval, void *extra);
 
 static void query_hist_add_query(time_bin_t duration);
 static bool query_histogram_enabled(void);
+static int get_hist_bin(int bins, int step, time_bin_t duration);
 
 static size_t get_histogram_size(void);
 
@@ -512,16 +513,26 @@ void query_hist_reset(bool locked) {
 static
 void query_hist_add_query(time_bin_t duration) {
     
-    int bin;
-    
-    bin = (int)ceil(duration * 1000.0) / (shared_histogram_info->step);
-    
-    /* queries that take longer than the last bin should go to
-     * the (HIST_BINS_MAX+1) bin */
-    bin = (bin >= (shared_histogram_info->bins)) ? (shared_histogram_info->bins) : bin;
+    int bin = get_hist_bin(shared_histogram_info->bins, shared_histogram_info->step, duration);
     
     shared_histogram_info->count_bins[bin] += 1;
     shared_histogram_info->time_bins[bin] += duration;
+    
+}
+
+static int get_hist_bin(int bins, int step, time_bin_t duration) {
+    
+    int bin = 0;
+    
+    if (shared_histogram_info->type == HISTOGRAM_LINEAR) {
+        bin = (int)floor((duration * 1000.0) / (shared_histogram_info->step));
+    } else {
+        bin = (int)floor(log2(1 + ((duration * 1000.0) / (shared_histogram_info->step))));
+    }
+    
+    /* queries that take longer than the last bin should go to
+     * the (HIST_BINS_MAX+1) bin */
+    return (bin >= (shared_histogram_info->bins)) ? (shared_histogram_info->bins) : bin;
     
 }
 
@@ -544,6 +555,7 @@ histogram_data * query_hist_get_data(bool scale) {
     /* we can do this using a shared lock */
     LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
 
+    tmp->histogram_type = (shared_histogram_info->type);
     tmp->bins_count = (shared_histogram_info->bins);
     tmp->bins_width = (shared_histogram_info->step);
     
@@ -588,6 +600,18 @@ void set_histogram_bins_count_hook(int newval, void *extra) {
     
     if (shared_histogram_info) {
         LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+        
+        /* if the histogram is logarithmic, there really is not much point
+         * in sending more than 32 bins (or something like that) */
+        if (shared_histogram_info->type == HISTOGRAM_LOG) {
+            int max_count = (int)ceil(log2(INT_MAX/shared_histogram_info->step));
+            if (newval > max_count) {
+                elog(NOTICE, "the max bin count %d is too high for log histogram with "
+                "%d ms resolution, using %d", newval, shared_histogram_info->step, max_count);
+                newval = max_count;
+            }
+        }
+        
         shared_histogram_info->bins = newval;
         query_hist_reset(true);
         LWLockRelease(shared_histogram_info->lock);
@@ -606,7 +630,20 @@ void set_histogram_bins_width_hook(int newval, void *extra) {
     
     if (shared_histogram_info) {
         LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+        
         shared_histogram_info->step = newval;
+        
+        /* if the histogram is logarithmic, there really is not much point
+         * in sending more than 32 bins (or something like that) */
+        if (shared_histogram_info->type == HISTOGRAM_LOG) {
+            int max_count = (int)ceil(log2(INT_MAX/shared_histogram_info->step));
+            if (shared_histogram_info->bins > max_count) {
+                elog(NOTICE, "the max bin count %d is too high for log histogram with "
+                "%d ms resolution, using %d", shared_histogram_info->bins, shared_histogram_info->step, max_count);
+                shared_histogram_info->bins = max_count;
+            }
+        }
+        
         query_hist_reset(true);
         LWLockRelease(shared_histogram_info->lock);
     }
@@ -642,7 +679,20 @@ void set_histogram_type_hook(int newval, void *extra) {
     
     if (shared_histogram_info) {
         LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+        
         shared_histogram_info->type = newval;
+        
+        /* if the histogram is logarithmic, there really is not much point
+         * in sending more than 32 bins (or something like that) */
+        if (shared_histogram_info->type == HISTOGRAM_LOG) {
+            int max_count = (int)ceil(log2(INT_MAX/shared_histogram_info->step));
+            if (shared_histogram_info->bins > max_count) {
+                elog(NOTICE, "the max bin count %d is too high for log histogram with "
+                "%d ms resolution, using %d", shared_histogram_info->bins, shared_histogram_info->step, max_count);
+                shared_histogram_info->bins = max_count;
+            }
+        }
+        
         query_hist_reset(true);
         LWLockRelease(shared_histogram_info->lock);
     }
