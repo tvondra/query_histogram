@@ -68,6 +68,9 @@ static int  default_histogram_step = 100;
 static int  default_histogram_sample_pct = 5;
 static int  default_histogram_type = HISTOGRAM_LINEAR;
 
+/* set at the end of init */
+static bool histogram_is_dynamic = true;
+
 /* TODO It might be useful to allow 'per database' histograms, or to collect
  *      the data only for some of the databases. So there might be options
  * 
@@ -389,6 +392,8 @@ void histogram_shmem_startup() {
 
     if (! found)
         histogram_load_from_file();
+    
+    histogram_is_dynamic = default_histogram_dynamic;
    
     /* seed the random generator */
     // srand((int)shared_histogram_info);
@@ -645,9 +650,9 @@ histogram_data * query_hist_get_data(bool scale) {
 
 void set_histogram_bins_count_hook(int newval, void *extra) {
     
-    if (! default_histogram_dynamic) {
+    if (! histogram_is_dynamic) {
         elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
-                      "it's not possible to change the bins/width/sample/type.");
+                      "it's not possible to change the number of bins.");
         return;
     }
     
@@ -675,9 +680,9 @@ void set_histogram_bins_count_hook(int newval, void *extra) {
 static
 void set_histogram_bins_width_hook(int newval, void *extra) {
     
-    if (! default_histogram_dynamic) {
+    if (! histogram_is_dynamic) {
         elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
-                      "it's not possible to change the bins/width/sample/type.");
+                      "it's not possible to change the bin width.");
         return;
     }
     
@@ -706,9 +711,9 @@ void set_histogram_bins_width_hook(int newval, void *extra) {
 static
 void set_histogram_sample_hook(int newval, void *extra) {
     
-    if (! default_histogram_dynamic) {
+    if (! histogram_is_dynamic ) {
         elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
-                      "it's not possible to change the bins/width/sample/type.");
+                      "it's not possible to change the sampling rate.");
         return;
     }
     
@@ -724,9 +729,9 @@ void set_histogram_sample_hook(int newval, void *extra) {
 static
 void set_histogram_type_hook(int newval, void *extra) {
     
-    if (! default_histogram_dynamic) {
+    if (! histogram_is_dynamic) {
         elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
-                      "it's not possible to change the bins/width/sample/type.");
+                      "it's not possible to change the histogram type.");
         return;
     }
     
