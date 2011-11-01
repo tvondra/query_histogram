@@ -425,22 +425,44 @@ void histogram_load_from_file(void) {
     /* compute md5 hash of the buffer */
     pg_md5_binary(buffer, sizeof(histogram_info_t), hash_comp);
     
+    /* check that the hashes are equal (the file is not corrupted) */
     if (memcmp(hash_file, hash_comp, 16) == 0) {
-        memcpy(shared_histogram_info, buffer, sizeof(histogram_info_t));
         
-        /* FIXME Is this necessary? */
-        shared_histogram_info->lock = LWLockAssign();
+        /* now we know the buffer contains 'valid' histogram */
         
-        /* copy the values from the histogram */
-        default_histogram_type = shared_histogram_info->type;
-        default_histogram_bins = shared_histogram_info->bins;
-        default_histogram_step = shared_histogram_info->step;
-        default_histogram_sample_pct = shared_histogram_info->sample_pct;
+        /* we can copy it into the shared segment iff the histogram 
+         * is static and has the same parameters, or if it's dynamic
+         * (in this case the parameters may be arbitrary) */
+        if ((default_histogram_dynamic) || 
+            ((! default_histogram_dynamic) && (((histogram_info_t*)buffer)->bins == default_histogram_bins)
+                                           && (((histogram_info_t*)buffer)->step == default_histogram_step)
+                                           && (((histogram_info_t*)buffer)->sample_pct == default_histogram_sample_pct)
+                                           && (((histogram_info_t*)buffer)->type == default_histogram_type))) {
+            
+            memcpy(shared_histogram_info, buffer, sizeof(histogram_info_t));
+            
+            /* FIXME Is this necessary? */
+            shared_histogram_info->lock = LWLockAssign();
+            
+            /* copy the values from the histogram */
+            default_histogram_type = shared_histogram_info->type;
+            default_histogram_bins = shared_histogram_info->bins;
+            default_histogram_step = shared_histogram_info->step;
+            default_histogram_sample_pct = shared_histogram_info->sample_pct;
+            
+            elog(DEBUG1, "successfully loaded query histogram from a file : %s",
+                HISTOGRAM_DUMP_FILE);
+            
+        } else {
+            
+            elog(WARNING, "can't load the histogram from %s because the parameters differ",
+                 HISTOGRAM_DUMP_FILE);
+            
+        }
         
-        elog(DEBUG1, "successfully loaded query histogram from a file : %s",
-             HISTOGRAM_DUMP_FILE);
     } else {
-        elog(NOTICE, "hashes do not match");
+        elog(WARNING, "can't load the histogram from %s because the hash is incorrect",
+             HISTOGRAM_DUMP_FILE);
     }
     
     FreeFile(file);
