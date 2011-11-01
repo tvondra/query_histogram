@@ -1,6 +1,9 @@
 #include "postgres.h"
 #include "tcop/utility.h"
 
+/* TODO When the histogram is static (dynamic=0), we may actually
+ *      use less memory because the use can't resize it (so the
+ *      bin_count is actually the only possible size). */
 /* 1000 bins ought be enough for anyone */
 #define HIST_BINS_MAX 1000
 

@@ -62,6 +62,16 @@ static int  default_histogram_step = 100;
 static int  default_histogram_sample_pct = 5;
 static int  default_histogram_type = HISTOGRAM_LINEAR;
 
+/* TODO It might be useful to allow 'per database' histograms, or to collect
+ *      the data only for some of the databases. So there might be options
+ * 
+ *        query_histogram.per_database={true|false}
+ *        query_histogram.databases= ... list of database names
+ *
+ *      and the per_database would require databases (so that we know how
+ *      much memory to allocate etc.)
+ */
+
 /* Saved hook values in case of unload */
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
