@@ -14,4 +14,4 @@ CREATE OR REPLACE FUNCTION query_histogram_get_reset()
     AS 'MODULE_PATHNAME', 'query_histogram_get_reset'
     LANGUAGE C IMMUTABLE;
 
-CREATE OR REPLACE VIEW query_histogram AS SELECT * FROM query_histogram(true);
+CREATE OR REPLACE VIEW query_histogram AS SELECT histogram.*, round(1000000*bin_time/(CASE WHEN bin_count > 0 THEN bin_count ELSE 1 END))/1000 AS bin_time_avg FROM query_histogram(true) histogram;
