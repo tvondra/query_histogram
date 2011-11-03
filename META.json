@@ -18,6 +18,14 @@
        "version": "1.0"
      }
    },
+   "resources": {
+      "repository": {
+        "url":  "git@github.com:tvondra/query_histogram.git",
+        "web":  "http://github.com/tvondra/query_histogram",
+        "type": "git"
+      },
+      "blog": "http://www.fuzzy.cz/en/articles/collecting-query-histogram/"
+   },
    "tags" : ["histogram", "monitoring"],
    "meta-spec": {
       "version": "1.0.0",
@@ -29,5 +37,5 @@
       "duration",
       "queries"
    ],
-   "release_status" : "stable"
+   "release_status" : "testing"
 }
