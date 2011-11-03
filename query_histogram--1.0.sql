@@ -1,5 +1,5 @@
-CREATE OR REPLACE FUNCTION query_histogram( IN scale BOOLEAN DEFAULT TRUE, OUT bin_from INT, OUT bin_to INT, OUT bin_count INT, OUT bin_count_pct REAL,
-                                            OUT bin_time REAL, OUT bin_time_pct REAL)
+CREATE OR REPLACE FUNCTION query_histogram( IN scale BOOLEAN DEFAULT TRUE, OUT bin_from INT, OUT bin_to INT, OUT bin_count BIGINT, OUT bin_count_pct REAL,
+                                            OUT bin_time DOUBLE PRECISION, OUT bin_time_pct REAL)
     RETURNS SETOF record
     AS 'MODULE_PATHNAME', 'query_histogram'
     LANGUAGE C IMMUTABLE;

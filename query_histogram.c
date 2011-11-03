@@ -115,7 +115,7 @@ query_histogram(PG_FUNCTION_ARGS)
             
         }
         
-        values[2] = UInt32GetDatum(data->count_data[binIdx]);
+        values[2] = Int64GetDatum(data->count_data[binIdx]);
         
         if (data->total_count > 0) {
             values[3] = Float4GetDatum(100.0*data->count_data[binIdx] / data->total_count);
@@ -123,7 +123,7 @@ query_histogram(PG_FUNCTION_ARGS)
             values[3] = Float4GetDatum(0);
         }
             
-        values[4] = Float4GetDatum(data->time_data[binIdx]);
+        values[4] = Float8GetDatum(data->time_data[binIdx]);
         
         if (data->total_time > 0) {
             values[5] = Float4GetDatum(100*data->time_data[binIdx] / data->total_time);

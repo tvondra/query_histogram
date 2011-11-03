@@ -16,8 +16,8 @@ typedef enum {
 } histogram_type_t;
 
 /* data types used to store queries */
-typedef unsigned long long count_bin_t;
-typedef float8             time_bin_t;
+typedef long long count_bin_t;
+typedef float8    time_bin_t;
 
 /* used to transfer the data to the SRF */
 typedef struct histogram_data {
