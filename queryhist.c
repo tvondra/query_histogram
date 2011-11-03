@@ -361,7 +361,7 @@ void histogram_shmem_startup() {
                     sizeof(histogram_info_t),
                     &found);
     
-    elog(DEBUG1, "initializing query histogram segment (size: %d B)", sizeof(histogram_info_t));
+    elog(DEBUG1, "initializing query histogram segment (size: %lu B)", sizeof(histogram_info_t));
 
     if (! found) {
         

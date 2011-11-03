@@ -15,10 +15,9 @@ typedef enum {
     HISTOGRAM_LOG
 } histogram_type_t;
 
-/* data types used to store queries (maybe we should use
- * longer values) */
-typedef unsigned long count_bin_t;
-typedef float4        time_bin_t;
+/* data types used to store queries */
+typedef unsigned long long count_bin_t;
+typedef float8             time_bin_t;
 
 /* used to transfer the data to the SRF */
 typedef struct histogram_data {
