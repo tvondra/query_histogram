@@ -2,7 +2,7 @@
    "name": "query_histogram",
    "abstract": "A histogram of queries",
    "description": "This extension allows you to collect histogram of queries.",
-   "version": "1.0",
+   "version": "1.0.0",
    "maintainer": "Tomas Vondra <tv@fuzzy.cz>",
    "license": "gpl_3",
    "prereqs": {
@@ -15,16 +15,16 @@
    "provides": {
      "query_histogram": {
        "file": "query_histogram--1.0.sql",
-       "version": "1.0"
+       "version": "1.0.0"
      }
    },
    "resources": {
       "repository": {
-        "url":  "git@github.com:tvondra/query_histogram.git",
+        "url":  "https://github.com:tvondra/query_histogram.git",
         "web":  "http://github.com/tvondra/query_histogram",
         "type": "git"
       },
-      "blog": "http://www.fuzzy.cz/en/articles/collecting-query-histogram/"
+      "x_blog": "http://www.fuzzy.cz/en/articles/collecting-query-histogram/"
    },
    "tags" : ["histogram", "monitoring"],
    "meta-spec": {
