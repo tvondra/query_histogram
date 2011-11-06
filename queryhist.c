@@ -34,10 +34,24 @@ static void histogram_shmem_shutdown(int code, Datum arg);
 
 static void histogram_load_from_file(void);
 
+#if (PG_VERSION_NUM >= 90100)
 static void set_histogram_bins_count_hook(int newval, void *extra);
 static void set_histogram_bins_width_hook(int newval, void *extra);
 static void set_histogram_sample_hook(int newval, void *extra);
 static void set_histogram_type_hook(int newval, void *extra);
+#else
+static bool set_histogram_bins_count_hook(int newval, bool doit, GucSource source);
+static bool set_histogram_bins_width_hook(int newval, bool doit, GucSource source);
+static bool set_histogram_sample_hook(int newval, bool doit, GucSource source);
+static bool set_histogram_type_hook(int newval, bool doit, GucSource source);
+#endif
+
+/* return from a hook */
+#if (PG_VERSION_NUM >= 90100)
+#define HOOK_RETURN(a)	return;
+#else
+#define HOOK_RETURN(a)	return (a);
+#endif
 
 static void query_hist_add_query(time_bin_t duration);
 static bool query_histogram_enabled(void);
@@ -85,7 +99,6 @@ static bool histogram_is_dynamic = true;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
-static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 
 void        _PG_init(void);
@@ -95,8 +108,12 @@ static void explain_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void explain_ExecutorRun(QueryDesc *queryDesc,
                     ScanDirection direction,
                     long count);
-static void explain_ExecutorFinish(QueryDesc *queryDesc);
 static void explain_ExecutorEnd(QueryDesc *queryDesc);
+
+#if (PG_VERSION_NUM >= 90100)
+static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
+static void explain_ExecutorFinish(QueryDesc *queryDesc);
+#endif
 
 /* the whole histogram (info and data) */
 static histogram_info_t * shared_histogram_info = NULL;
@@ -120,7 +137,9 @@ _PG_init(void)
                              false,
                              PGC_BACKEND,
                              0,
+#if (PG_VERSION_NUM >= 90100)
                              NULL,
+#endif
                              NULL,
                              NULL);
     
@@ -132,7 +151,9 @@ _PG_init(void)
                             0, 1000,
                             PGC_SUSET,
                             0,
+#if (PG_VERSION_NUM >= 90100)
                             NULL,
+#endif
                             &set_histogram_bins_count_hook,
                             NULL);
     
@@ -144,7 +165,9 @@ _PG_init(void)
                             1, 1000,
                             PGC_SUSET,
                             GUC_UNIT_MS,
+#if (PG_VERSION_NUM >= 90100)
                             NULL,
+#endif
                             &set_histogram_bins_width_hook,
                             NULL);
     
@@ -156,7 +179,9 @@ _PG_init(void)
                             1, 100,
                             PGC_SUSET,
                             0,
+#if (PG_VERSION_NUM >= 90100)
                             NULL,
+#endif
                             &set_histogram_sample_hook,
                             NULL);
 
@@ -168,7 +193,9 @@ _PG_init(void)
                              histogram_type_options,
                              PGC_SUSET,
                              0,
+#if (PG_VERSION_NUM >= 90100)
                              NULL,
+#endif
                              &set_histogram_type_hook,
                              NULL);
 
@@ -190,8 +217,10 @@ _PG_init(void)
     ExecutorStart_hook = explain_ExecutorStart;
     prev_ExecutorRun = ExecutorRun_hook;
     ExecutorRun_hook = explain_ExecutorRun;
+#if (PG_VERSION_NUM >= 90100)
     prev_ExecutorFinish = ExecutorFinish_hook;
     ExecutorFinish_hook = explain_ExecutorFinish;
+#endif
     prev_ExecutorEnd = ExecutorEnd_hook;
     ExecutorEnd_hook = explain_ExecutorEnd;
     
@@ -207,7 +236,9 @@ _PG_fini(void)
     /* Uninstall hooks. */
     ExecutorStart_hook = prev_ExecutorStart;
     ExecutorRun_hook = prev_ExecutorRun;
+#if (PG_VERSION_NUM >= 90100)
     ExecutorFinish_hook = prev_ExecutorFinish;
+#endif
     ExecutorEnd_hook = prev_ExecutorEnd;
     shmem_startup_hook = prev_shmem_startup_hook;
 }
@@ -266,6 +297,7 @@ explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
     PG_END_TRY();
 }
 
+#if (PG_VERSION_NUM >= 90100)
 /*
  * ExecutorFinish hook: all we need do is track nesting depth
  */
@@ -288,6 +320,7 @@ explain_ExecutorFinish(QueryDesc *queryDesc)
     }
     PG_END_TRY();
 }
+#endif
 
 /*
  * ExecutorEnd hook: log results if needed
@@ -648,12 +681,17 @@ histogram_data * query_hist_get_data(bool scale) {
 
 }
 
-void set_histogram_bins_count_hook(int newval, void *extra) {
+#if (PG_VERSION_NUM >= 90100)
+static void set_histogram_bins_count_hook(int newval, void *extra) {
+#else
+static bool set_histogram_bins_count_hook(int newval, bool doit, GucSource source) {
+#endif
     
     if (! histogram_is_dynamic) {
         elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
                       "it's not possible to change the number of bins.");
-        return;
+    
+        HOOK_RETURN(false);
     }
     
     if (shared_histogram_info) {
@@ -675,15 +713,21 @@ void set_histogram_bins_count_hook(int newval, void *extra) {
         LWLockRelease(shared_histogram_info->lock);
     }
     
+    HOOK_RETURN(true);
+    
 }
 
-static
-void set_histogram_bins_width_hook(int newval, void *extra) {
+#if (PG_VERSION_NUM >= 90100)
+static void set_histogram_bins_width_hook(int newval, void *extra) {
+#else
+static bool set_histogram_bins_width_hook(int newval, bool doit, GucSource source) {
+#endif
     
     if (! histogram_is_dynamic) {
         elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
                       "it's not possible to change the bin width.");
-        return;
+
+        HOOK_RETURN(false);
     }
     
     if (shared_histogram_info) {
@@ -706,15 +750,22 @@ void set_histogram_bins_width_hook(int newval, void *extra) {
         LWLockRelease(shared_histogram_info->lock);
     }
     
+    HOOK_RETURN(true);
+    
 }
 
-static
-void set_histogram_sample_hook(int newval, void *extra) {
+
+#if (PG_VERSION_NUM >= 90100)
+static void set_histogram_sample_hook(int newval, void *extra) {
+#else
+static bool set_histogram_sample_hook(int newval, bool doit, GucSource source) {
+#endif
     
     if (! histogram_is_dynamic ) {
         elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
                       "it's not possible to change the sampling rate.");
-        return;
+    
+        HOOK_RETURN(false);
     }
     
     if (shared_histogram_info) {
@@ -724,15 +775,22 @@ void set_histogram_sample_hook(int newval, void *extra) {
         LWLockRelease(shared_histogram_info->lock);
     }
     
+    HOOK_RETURN(true);
+    
 }
 
-static
-void set_histogram_type_hook(int newval, void *extra) {
+
+#if (PG_VERSION_NUM >= 90100)
+static void set_histogram_type_hook(int newval, void *extra) {
+#else
+static bool set_histogram_type_hook(int newval, bool doit, GucSource source) {
+#endif
     
     if (! histogram_is_dynamic) {
         elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
                       "it's not possible to change the histogram type.");
-        return;
+
+        HOOK_RETURN(false);
     }
     
     if (shared_histogram_info) {
@@ -754,6 +812,8 @@ void set_histogram_type_hook(int newval, void *extra) {
         query_hist_reset(true);
         LWLockRelease(shared_histogram_info->lock);
     }
+    
+    HOOK_RETURN(true);
     
 }
 

@@ -2,13 +2,13 @@
    "name": "query_histogram",
    "abstract": "A histogram of queries",
    "description": "This extension allows you to collect histogram of queries.",
-   "version": "1.0.0",
+   "version": "1.1.0",
    "maintainer": "Tomas Vondra <tv@fuzzy.cz>",
    "license": "gpl_3",
    "prereqs": {
       "runtime": {
          "requires": {
-            "PostgreSQL": "9.1.0"
+            "PostgreSQL": "9.0.0"
          }
       }
    },
@@ -16,6 +16,10 @@
      "query_histogram": {
        "file": "query_histogram--1.0.sql",
        "version": "1.0.0"
+     },
+     "query_histogram": {
+       "file": "query_histogram--1.1.sql",
+       "version": "1.1.0"
      }
    },
    "resources": {
@@ -26,16 +30,10 @@
       },
       "x_blog": "http://www.fuzzy.cz/en/articles/collecting-query-histogram/"
    },
-   "tags" : ["histogram", "monitoring"],
+   "tags" : ["histogram", "monitoring", "duration", "queries"],
    "meta-spec": {
       "version": "1.0.0",
       "url": "http://pgxn.org/meta/spec.txt"
    },
-   "tags": [
-      "histogram",
-      "monitoring",
-      "duration",
-      "queries"
-   ],
    "release_status" : "testing"
 }
