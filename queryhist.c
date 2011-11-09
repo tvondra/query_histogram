@@ -39,11 +39,13 @@ static void set_histogram_bins_count_hook(int newval, void *extra);
 static void set_histogram_bins_width_hook(int newval, void *extra);
 static void set_histogram_sample_hook(int newval, void *extra);
 static void set_histogram_type_hook(int newval, void *extra);
+static void set_histogram_track_utility(bool newval, void *extra);
 #else
 static bool set_histogram_bins_count_hook(int newval, bool doit, GucSource source);
 static bool set_histogram_bins_width_hook(int newval, bool doit, GucSource source);
 static bool set_histogram_sample_hook(int newval, bool doit, GucSource source);
 static bool set_histogram_type_hook(int newval, bool doit, GucSource source);
+static bool set_histogram_track_utility(bool newval, bool doit, GucSource source);
 #endif
 
 /* return from a hook */
@@ -77,6 +79,7 @@ static size_t get_histogram_size(void);
 
 /* default values (used for init) */
 static bool default_histogram_dynamic = false;
+static bool default_histogram_utility = true; /* track DDL */
 static int  default_histogram_bins = 100;
 static int  default_histogram_step = 100;
 static int  default_histogram_sample_pct = 5;
@@ -100,6 +103,7 @@ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
+static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
 void        _PG_init(void);
 void        _PG_fini(void);
@@ -109,6 +113,9 @@ static void explain_ExecutorRun(QueryDesc *queryDesc,
                     ScanDirection direction,
                     long count);
 static void explain_ExecutorEnd(QueryDesc *queryDesc);
+static void queryhist_ProcessUtility(Node *parsetree,
+              const char *queryString, ParamListInfo params, bool isTopLevel,
+                    DestReceiver *dest, char *completionTag);
 
 #if (PG_VERSION_NUM >= 90100)
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
@@ -141,6 +148,20 @@ _PG_init(void)
                              NULL,
 #endif
                              NULL,
+                             NULL);
+    
+    /* Define custom GUC variables. */
+    DefineCustomBoolVariable("query_histogram.track_utility",
+                              "Selects whether utility commands are tracked.",
+                             NULL,
+                             &default_histogram_utility,
+                             true,
+                             PGC_SUSET,
+                             0,
+#if (PG_VERSION_NUM >= 90100)
+                             NULL,
+#endif
+                             &set_histogram_track_utility,
                              NULL);
     
     DefineCustomIntVariable("query_histogram.bin_count",
@@ -223,7 +244,9 @@ _PG_init(void)
 #endif
     prev_ExecutorEnd = ExecutorEnd_hook;
     ExecutorEnd_hook = explain_ExecutorEnd;
-    
+    prev_ProcessUtility = ProcessUtility_hook;
+    ProcessUtility_hook = queryhist_ProcessUtility;
+
 }
 
 
@@ -374,6 +397,83 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
         standard_ExecutorEnd(queryDesc);
     
 }
+
+/*
+ * ProcessUtility hook
+ */
+static void
+queryhist_ProcessUtility(Node *parsetree, const char *queryString,
+                    ParamListInfo params, bool isTopLevel,
+                    DestReceiver *dest, char *completionTag)
+{
+    if (default_histogram_utility && (nesting_level == 0) && query_histogram_enabled())
+    {
+        instr_time  start;
+        instr_time  duration;
+        float       seconds;
+
+        INSTR_TIME_SET_CURRENT(start);
+
+        nesting_level++;
+        PG_TRY();
+        {
+            if (prev_ProcessUtility)
+                prev_ProcessUtility(parsetree, queryString, params,
+                                    isTopLevel, dest, completionTag);
+            else
+                standard_ProcessUtility(parsetree, queryString, params,
+                                        isTopLevel, dest, completionTag);
+            nesting_level--;
+        }
+        PG_CATCH();
+        {
+            nesting_level--;
+            PG_RE_THROW();
+        }
+        PG_END_TRY();
+
+        INSTR_TIME_SET_CURRENT(duration);
+        INSTR_TIME_SUBTRACT(duration, start);
+        
+        seconds = INSTR_TIME_GET_DOUBLE(duration);
+
+        /* is the histogram static or dynamic? */
+        if (! default_histogram_dynamic) {
+            
+            /* in case of static histogram, it's quite simple - check the number
+             * of bins and a sample rate - then lock the segment, add the query
+             * and unlock it again */
+            if ((default_histogram_bins > 0) && (rand() % 100 <  default_histogram_sample_pct)) {
+                LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+                query_hist_add_query(seconds);
+                LWLockRelease(shared_histogram_info->lock);
+            }
+            
+        } else {            
+            /* when the histogram is dynamic, we have to lock it first, as we
+             * will access the sample_pct in the histogram */
+            LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
+            if ((shared_histogram_info->bins > 0) && (rand() % 100 <  shared_histogram_info->sample_pct)) {
+                LWLockRelease(shared_histogram_info->lock);
+                LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+                query_hist_add_query(seconds);
+            }
+            LWLockRelease(shared_histogram_info->lock);
+            
+        }
+
+    }
+    else
+    {
+        if (prev_ProcessUtility)
+            prev_ProcessUtility(parsetree, queryString, params,
+                                isTopLevel, dest, completionTag);
+        else
+            standard_ProcessUtility(parsetree, queryString, params,
+                                    isTopLevel, dest, completionTag);
+    }
+}
+
 
 /* This is probably the most important part - allocates the shared 
  * segment, initializes it etc. */
@@ -809,6 +909,31 @@ static bool set_histogram_type_hook(int newval, bool doit, GucSource source) {
             }
         }
         
+        query_hist_reset(true);
+        LWLockRelease(shared_histogram_info->lock);
+    }
+    
+    HOOK_RETURN(true);
+    
+}
+
+
+#if (PG_VERSION_NUM >= 90100)
+static void set_histogram_track_utility(bool newval, void *extra) {
+#else
+static bool set_histogram_track_utility(bool newval, bool doit, GucSource source) {
+#endif
+    
+    if (! histogram_is_dynamic) {
+        elog(WARNING, "The histogram is not dynamic (query_histogram.dynamic=0), so "
+                      "it's not possible to change the histogram type.");
+
+        HOOK_RETURN(false);
+    }
+    
+    if (shared_histogram_info) {
+        LWLockAcquire(shared_histogram_info->lock, LW_EXCLUSIVE);
+        shared_histogram_info->track_utility = newval;
         query_hist_reset(true);
         LWLockRelease(shared_histogram_info->lock);
     }

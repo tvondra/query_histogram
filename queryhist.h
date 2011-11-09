@@ -51,6 +51,7 @@ typedef struct histogram_info_t {
     int  bins;
     int  step;
     int  sample_pct;
+    bool track_utility;
     
     /* data of the histogram */
     count_bin_t count_bins[HIST_BINS_MAX+1];
