@@ -14,10 +14,6 @@
    },
    "provides": {
      "query_histogram": {
-       "file": "query_histogram--1.0.sql",
-       "version": "1.0.0"
-     },
-     "query_histogram": {
        "file": "query_histogram--1.1.sql",
        "version": "1.1.0"
      }

@@ -1,8 +1,8 @@
 MODULE_big = query_histogram
-OBJS = query_histogram.o queryhist.o
+OBJS = src/query_histogram.o src/queryhist.o
 
 EXTENSION = query_histogram
-DATA = query_histogram--1.0.sql
+DATA = sql/query_histogram--1.1.sql
 MODULES = query_histogram
 
 CFLAGS=`pg_config --includedir-server`
@@ -13,8 +13,6 @@ include $(PGXS)
 
 all: query_histogram.so
 
-query_histogram.so: query_histogram.o queryhist.o
+query_histogram.so: $(OBJS)
 
-queryhist.o : queryhist.c
-
-query_histogram.o: query_histogram.c
+%.o : src/%.c
