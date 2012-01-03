@@ -4,7 +4,7 @@
    "description": "This extension allows you to collect histogram of queries.",
    "version": "1.1.0",
    "maintainer": "Tomas Vondra <tv@fuzzy.cz>",
-   "license": "gpl_3",
+   "license": "bsd",
    "prereqs": {
       "runtime": {
          "requires": {
