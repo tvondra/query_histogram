@@ -10,10 +10,10 @@ backends may share it and it's not lost in case of on disconnections).
 The segment is quite small (about 8kB of data) and it's protected by
 a System V semaphore. That might cause some performance problems - to
 minimize this issue, you may sample only some of the queries (see the
-sample_pct GUC option).
+`sample_pct` GUC variable).
 
 Most of the code that interacts directly with the executor comes from
-the auto_explain and pg_stat_statements extensions (hooks, shared
+the `auto_explain` and `pg_stat_statements` extensions (hooks, shared
 memory management etc).
 
 
@@ -22,15 +22,15 @@ Install
 Installing the extension is quite simple, especially if you're on 9.1.
 In that case all you need to do is this:
 
-   $ make install
+    $ make install
 
 and the (after connecting to the database)
 
-   db=# CREATE EXTENSION query_histogram;
+    db=# CREATE EXTENSION query_histogram;
 
 If you're on pre-9.1 version, you'll have to do the second part manually
-by running the SQL script (query_histogram--x.y.sql) in the database. If
-needed, replace MODULE_PATHNAME by $libdir.
+by running the SQL script (`query_histogram--x.y.sql`) in the database. If
+needed, replace `MODULE_PATHNAME` by $libdir.
 
 
 Config
@@ -40,58 +40,58 @@ module. This needs to be done from postgresql.conf, as the module
 needs to allocate space in the shared memory segment. So add this to
 the config file (or update the current values)
 
-   # libraries to load
-   shared_preload_libraries = 'query_histogram'
+    # libraries to load
+    shared_preload_libraries = 'query_histogram'
 
-   # known GUC prefixes
-   custom_variable_classes = 'query_histogram'
+    # known GUC prefixes
+    custom_variable_classes = 'query_histogram'
 
-   # config of the query histogram
-   query_histogram.sample_pct = 5
-   query_histogram.bin_width = 10
-   query_histogram.bin_count = 1000
-   query_histogram.dynamic = true
+    # config of the query histogram
+    query_histogram.sample_pct = 5
+    query_histogram.bin_width = 10
+    query_histogram.bin_count = 1000
+    query_histogram.dynamic = true
 
 The meaning of those config options is this:
 
-  (a) query_histogram.sample_pct - sampling rate, i.e. how many
-      queries will be actually inserted into the histogram (this
-      involves locking, so you may use lower values to limit the
-      impact if this is a problem)
+* `query_histogram.sample_pct` - sampling rate, i.e. how many
+  queries will be actually inserted into the histogram (this
+  involves locking, so you may use lower values to limit the
+  impact if this is a problem)
 
-  (b) query_histogram.bin_count - number of bins (0-1000), 0 means
-      the histogram is disabled (still, the hooks are installed
-      so there is some overhead - if you don't need the histogram
-      remove it from shared_preload_libraries)
+* `query_histogram.bin_count` - number of bins (0-1000), 0 means
+  the histogram is disabled (still, the hooks are installed
+  so there is some overhead - if you don't need the histogram
+  remove it from shared_preload_libraries)
 
-  (c) query_histogram.bin_width - width of each bin (in miliseconds)
+* `query_histogram.bin_width` - width of each bin (in miliseconds)
 
-  (d) query_histogram.dynamic - if you set this to false, then you
-      won't be able to dynamically change the histogram options
-      (number of bins, sampling rate etc.) set in the config file
+* `query_histogram.dynamic` - if you set this to false, then you
+  won't be able to dynamically change the histogram options
+  (number of bins, sampling rate etc.) set in the config file
 
 When you set the histogram to dynamic=true, you may change the
 histogram on the fly, but it adds overhead because whenever you need
-to access the sample_pct, it has to be loaded from the shared segment.
+to access the `sample_pct`, it has to be loaded from the shared segment.
 So the segment has to be locked etc.
 
 Again, this is an option that allows you to reduce the overhead. If
 you're afraid the overhead might be an issue, use dynamic=false and
-low sample_pct (e.g. 5).
+low `sample_pct` (e.g. 5).
 
 If you prefer flexibility and exact overview of the queries, use high
-sample_pct (even 100) and dynamic=true (so that you may reconfigure
+`sample_pct` (even 100) and dynamic=true (so that you may reconfigure
 the queries using SET commands).
 
 So if you want a histogram with 100 bins, each bin 1 second wide, and
 you've set 'dynamic=true', you may do this
 
-  db=# SET query_histogram.bin_count = 100;
-  db=# SET query_histogram.bin_width = 1000;
+    db=# SET query_histogram.bin_count = 100;
+    db=# SET query_histogram.bin_width = 1000;
 
 And if you want to sample just 1% of the queries, you may do this
 
-  db=# SET query_histogram.sample_pct = 1;
+    db=# SET query_histogram.sample_pct = 1;
 
 You can't change the 'dynamic' option (except directly in the file).
 
@@ -100,25 +100,25 @@ Reading the histogram data
 --------------------------
 There are two functions that you can use to work with the histogram.
 
-  1) query_histogram()        - get data
-  2) query_histogram_reset()  - reset data, start collecting again
+* `query_histogram()`        - get data
+* `query_histogram_reset()`  - reset data, start collecting again
 
 The first one is the most important one, as it allows you to read the
 current histogram data - just use it as a table:
 
-   db=# SELECT * FROM query_histogram();
+    db=# SELECT * FROM query_histogram();
 
 The columns of the result are rather obvious:
 
-  a) bin_from, bin_to - bin range (from, to) in miliseconds
+* `bin_from`, `bin_to` - bin range (from, to) in miliseconds
 
-  b) bin_count - number of queries in the bin
+* `bin_count` - number of queries in the bin
 
-  c) bin_count_pct - number of queries proportionaly to the total number
+* `bin_count_pct` - number of queries proportionaly to the total number
                      in the histogram
-  d) bin_time - time accumulated by queries in the bin
+* `bin_time` - time accumulated by queries in the bin
 
-  e) bin_time_pct - time accumulated by queries in the bin proportionaly
+* `bin_time_pct` - time accumulated by queries in the bin proportionaly
                     to the total time (accumulted by all queries)
 
 The second function may be handy if you need to reset the histogram and
