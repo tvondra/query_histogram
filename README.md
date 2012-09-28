@@ -19,8 +19,13 @@ memory management etc).
 
 Install
 -------
-Installing the extension is quite simple, especially if you're on 9.1.
-In that case all you need to do is this:
+Installing the extension is quite simple, especially if you're using
+pgxn client (which I recommend) - all you need to do is
+
+    $ pgxn install query_histogram
+    $ pgxn load -d mydb query_histogram
+
+but you may also do the installation manually like this:
 
     $ make install
 
@@ -35,7 +40,7 @@ needed, replace `MODULE_PATHNAME` by $libdir.
 
 Config
 ------
-No the functions are created, but you still need to load the shared
+Now the functions are created, but you still need to load the shared
 module. This needs to be done from postgresql.conf, as the module
 needs to allocate space in the shared memory segment. So add this to
 the config file (or update the current values)
@@ -43,7 +48,7 @@ the config file (or update the current values)
     # libraries to load
     shared_preload_libraries = 'query_histogram'
 
-    # known GUC prefixes
+    # known GUC prefixes (not needed since 9.2)
     custom_variable_classes = 'query_histogram'
 
     # config of the query histogram
@@ -51,6 +56,8 @@ the config file (or update the current values)
     query_histogram.bin_width = 10
     query_histogram.bin_count = 1000
     query_histogram.dynamic = true
+
+And then restart the database to actually load the shared module.
 
 The meaning of those config options is this:
 
