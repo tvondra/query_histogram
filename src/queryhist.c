@@ -15,11 +15,13 @@
 #include "executor/executor.h"
 #include "executor/instrument.h"
 #include "utils/guc.h"
+#include "tcop/utility.h"
 
 #include "libpq/md5.h"
 
 #include "queryhist.h"
 
+/* is this a linear (bins of equal width) or logarithmic histogram? */
 static const struct config_enum_entry histogram_type_options[] = {
     {"linear", HISTOGRAM_LINEAR, false},
     {"log", HISTOGRAM_LOG, false},
@@ -113,9 +115,18 @@ static void explain_ExecutorRun(QueryDesc *queryDesc,
                     ScanDirection direction,
                     long count);
 static void explain_ExecutorEnd(QueryDesc *queryDesc);
+
+#if (PG_VERSION_NUM >= 90300)
+static void queryhist_ProcessUtility(Node *parsetree, const char *queryString,
+                                     ProcessUtilityContext context,
+                                     ParamListInfo params, DestReceiver *dest,
+                                     char *completionTag);
+#else
 static void queryhist_ProcessUtility(Node *parsetree,
-              const char *queryString, ParamListInfo params, bool isTopLevel,
-                    DestReceiver *dest, char *completionTag);
+                                     const char *queryString, ParamListInfo params,
+                                     bool isTopLevel, DestReceiver *dest,
+                                     char *completionTag);
+#endif
 
 #if (PG_VERSION_NUM >= 90100)
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
@@ -399,15 +410,22 @@ explain_ExecutorEnd(QueryDesc *queryDesc)
 }
 
 /*
- * ProcessUtility hook
+ * ProcessUtility hook (API changed in 9.3)
  */
 static void
+#if (PG_VERSION_NUM >= 90300)
 queryhist_ProcessUtility(Node *parsetree, const char *queryString,
-                    ParamListInfo params, bool isTopLevel,
-                    DestReceiver *dest, char *completionTag)
+                         ProcessUtilityContext context, ParamListInfo params,
+                         DestReceiver *dest, char *completionTag)
+#else
+queryhist_ProcessUtility(Node *parsetree, const char *queryString,
+                         ParamListInfo params, bool isTopLevel,
+                         DestReceiver *dest, char *completionTag)
+#endif
 {
     if (default_histogram_utility && (nesting_level == 0) && query_histogram_enabled())
     {
+        /* collecting histogram is enabled, we're in top level (nesting_level=0) */
         instr_time  start;
         instr_time  duration;
         float       seconds;
@@ -418,11 +436,22 @@ queryhist_ProcessUtility(Node *parsetree, const char *queryString,
         PG_TRY();
         {
             if (prev_ProcessUtility)
+#if (PG_VERSION_NUM >= 90300)
+                prev_ProcessUtility(parsetree, queryString, context, params,
+                                    dest, completionTag);
+#else
                 prev_ProcessUtility(parsetree, queryString, params,
                                     isTopLevel, dest, completionTag);
+#endif
             else
+#if (PG_VERSION_NUM >= 90300)
+                standard_ProcessUtility(parsetree, queryString, context, params,
+                                        dest, completionTag);
+#else
                 standard_ProcessUtility(parsetree, queryString, params,
                                         isTopLevel, dest, completionTag);
+#endif
+
             nesting_level--;
         }
         PG_CATCH();
@@ -465,12 +494,23 @@ queryhist_ProcessUtility(Node *parsetree, const char *queryString,
     }
     else
     {
+        /* collecting histogram is not enabled, so just call the hooks directly */
         if (prev_ProcessUtility)
+#if (PG_VERSION_NUM >= 90300)
+            prev_ProcessUtility(parsetree, queryString, context, params,
+                                dest, completionTag);
+#else
             prev_ProcessUtility(parsetree, queryString, params,
                                 isTopLevel, dest, completionTag);
-        else
+#endif
+            else
+#if (PG_VERSION_NUM >= 90300)
+            standard_ProcessUtility(parsetree, queryString, context, params,
+                                    dest, completionTag);
+#else
             standard_ProcessUtility(parsetree, queryString, params,
                                     isTopLevel, dest, completionTag);
+#endif
     }
 }
 
@@ -540,7 +580,7 @@ void histogram_load_from_file(void) {
     FILE * file;
     char hash_file[16];
     char hash_comp[16];
-    char * buffer;
+    char * buffer = NULL;
     
     /* load the histogram from the file */
     file = AllocateFile(HISTOGRAM_DUMP_FILE, PG_BINARY_R);

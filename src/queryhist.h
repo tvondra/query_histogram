@@ -1,6 +1,7 @@
 #include "postgres.h"
 #include "tcop/utility.h"
 #include "utils/timestamp.h"
+#include "storage/lwlock.h"
 
 /* TODO When the histogram is static (dynamic=0), we may actually
  *      use less memory because the use can't resize it (so the
