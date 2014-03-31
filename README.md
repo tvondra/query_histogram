@@ -1,16 +1,25 @@
 Query Histogram Extension
 =========================
 This is a PostgreSQL extension providing a simple histogram of queries
-(according to their duration). Once you install the connection, you
-may use three functions and four GUC to control the histogram - get
+(according to their duration). Once you install the extension, you
+may use several functions and four GUC to control the histograms - get
 data, reset it, change the bin size, sampling etc.
 
 The histogram data are stored in a shared memory segment (so that all
-backends may share it and it's not lost in case of on disconnections).
-The segment is quite small (about 8kB of data) and it's protected by
-a System V semaphore. That might cause some performance problems - to
-minimize this issue, you may sample only some of the queries (see the
-`sample_pct` GUC variable).
+backends may share it). The segment size depends on the maximum number
+of tracked databases / number of bins etc. In general it should not be
+larger than a few MBs for hundreds of databases with ~1000 bins.
+
+The segment and per-db histograms are protected by LW Locks, but this
+should not cause any performance issues. The worst impact I've measured
+so far is ~2.5% on a "pgbench -S" benchmark with many extremely short
+queries (~1ms). On a more realistic workloads (with longer queries)
+the overhead is practically non-existent.
+
+However if you run into a performance issue because of collecting the
+histogram data, you may sample only some of the queries (see the
+`sample_pct` GUC variable). For example sampling only 5% should help
+a lot while still providing good overview of the workload.
 
 Most of the code that interacts directly with the executor comes from
 the `auto_explain` and `pg_stat_statements` extensions (hooks, shared
@@ -107,27 +116,96 @@ Reading the histogram data
 --------------------------
 There are two functions that you can use to work with the histogram.
 
-* `query_histogram()`        - get data
-* `query_histogram_reset()`  - reset data, start collecting again
+* `query_histogram()`   - get histogram for a single database (or global)
+* `query_histograms()`  - get histograms for all tracked databases
 
-The first one is the most important one, as it allows you to read the
-current histogram data - just use it as a table:
+Or you may use one of the predefined views:
 
-    db=# SELECT * FROM query_histogram();
+* `query_histogram`         - histogram for the current db
+* `query_histogram_global`  - global histogram (aggregating all dbs)
+* `query_histograms`        - histograms for all databases
 
-The columns of the result are rather obvious:
+The main columns returned by these functions and views are these:
+
+* `databaseoid` - OID of the database (NULL for global histogram),
+                  returned only from `query_histograms`
 
 * `bin_from`, `bin_to` - bin range (from, to) in miliseconds
 
 * `bin_count` - number of queries in the bin
 
 * `bin_count_pct` - number of queries proportionaly to the total number
-                     in the histogram
+                    in the histogram
 * `bin_time` - time accumulated by queries in the bin
 
 * `bin_time_pct` - time accumulated by queries in the bin proportionaly
-                    to the total time (accumulted by all queries)
+                   to the total time (accumulted by all queries)
+
+* `bin_time_avg` - average time of queries in this bin (rounded to ms)
+
+All the functions have `scale` parameter, which is important when using
+`sample_pct` with values other than 100 (i.e. when sampling only portion
+of the queries). With `scale=true` the data are scaled as if all queries
+were sampled. With `scale=true` only the actually sampled data (counts
+and durations) are returned. All the views use `scale=true`.
+
+
+Resetting histogram(s)
+----------------------
+From time to time you may need to throw away all the collected data and
+start over. In that case you may use these functions to reset either
+one or all the histograms:
+
+* `query_histogram_reset(oid, bool)` - reset all histograms (optionally
+                                       reset list of tracked dbs)
+
+* `query_histogram_reset_global(oid, boolean)` - reset global histogram
+
+* `query_histogram_reset_db(oid, bool)` - reset global histogram
 
 The second function may be handy if you need to reset the histogram and
 start collecting again (for example you may collect the stats regularly
 and reset it).
+
+
+Persisting histogram data
+-------------------------
+On each server shutdown, histogram data are persisted into a file (in
+the $DATA/global directory). And of course, on each server startup,
+the extension attempts to read the data from the file. That means that
+the histogram is preserved across server restarts (at least for
+clean shutdowns).
+
+Reading the file is meant to be "permissive" - that is, accepting even
+histograms with different parameters (than the ones in server). For
+example it's possible to lower maximum number of databases, as long as
+the number of databases actually tracked in the file is lower.
+
+So if you find out you've initially set query_histogram.max_databases
+too high (and you're only using small part of the reserved memory),
+then you can lower the GUC value and restart the server.
+
+Of course this is not perfect and there are combinations that are not
+acceptable (at least for now).
+
+
+Known issues
+------------
+The extension is (currently) unable to react to a DROP DATABASE. If the
+database is tracked (there's a histogram for it), this histogram will
+remain there until removed explicitly (e.g. by calling one of the reset
+functions). The easiest way to do that is a query like this
+
+    SELECT query_histogram_reset(oid, true) FROM (
+        SELECT databaseoid
+          FROM query_histograms LEFT JOIN pg_database
+                                       ON (oid = databaseoid)
+         WHERE oid IS NULL
+    ) dropped_databases;
+
+which selects databases with tracked histograms but missing in the
+system catalog, and then resets the histogram. If you're dropping
+a lot of databases, it might be a good idea putting this into cron.
+
+Maybe in the future it'll be possible to use an event trigger, but until
+then this is the best solution I'm aware of.
