@@ -237,7 +237,6 @@ _PG_init(void)
 	ExecutorEnd_hook = explain_ExecutorEnd;
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = queryhist_ProcessUtility;
-
 }
 
 
@@ -493,9 +492,9 @@ queryhist_ProcessUtility(Node *parsetree, const char *queryString,
 
 /* This is probably the most important part - allocates the shared
  * segment, initializes it etc. */
-static
-void histogram_shmem_startup() {
-
+static void
+histogram_shmem_startup()
+{
 	bool found = FALSE;
 
 	if (prev_shmem_startup_hook)
@@ -546,13 +545,11 @@ void histogram_shmem_startup() {
 
 	/* seed the random generator */
 	// srand((int)shared_histogram_info);
-
 }
 
 /* Loads the histogram data from a file (and checks that the md5 hash of the contents matches). */
-static
-void histogram_load_from_file(void) {
-
+static void histogram_load_from_file(void)
+{
 	FILE * file;
 	char hash_file[16];
 	char hash_comp[16];
@@ -634,13 +631,12 @@ error: /* error handling */
 		pfree(buffer);
 	if (file)
 		FreeFile(file);
-
 }
 
 /* Dumps the histogram data into a file (with a md5 hash of the contents at the beginning). */
-static
-void histogram_shmem_shutdown(int code, Datum arg) {
-
+static void
+histogram_shmem_shutdown(int code, Datum arg)
+{
 	FILE * file;
 	char buffer[16];
 
@@ -670,12 +666,12 @@ error:
 					HISTOGRAM_DUMP_FILE)));
 	if (file)
 		FreeFile(file);
-
 }
 
 /* need an exclusive lock to modify the histogram */
-void query_hist_reset(bool locked) {
-
+void
+query_hist_reset(bool locked)
+{
 	if (! shared_histogram_info) {
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -695,22 +691,21 @@ void query_hist_reset(bool locked) {
 	if (! locked) {
 		LWLockRelease(shared_histogram_info->lock);
 	}
-
 }
 
 /* needs to be already locked */
-static
-void query_hist_add_query(time_bin_t duration) {
-
+static void
+query_hist_add_query(time_bin_t duration)
+{
 	int bin = get_hist_bin(shared_histogram_info->bins, shared_histogram_info->step, duration);
 
 	shared_histogram_info->count_bins[bin] += 1;
 	shared_histogram_info->time_bins[bin] += duration;
-
 }
 
-static int get_hist_bin(int bins, int step, time_bin_t duration) {
-
+static int
+get_hist_bin(int bins, int step, time_bin_t duration)
+{
 	int bin = 0;
 
 	if (shared_histogram_info->type == HISTOGRAM_LINEAR) {
@@ -722,11 +717,11 @@ static int get_hist_bin(int bins, int step, time_bin_t duration) {
 	/* queries that take longer than the last bin should go to
 	 * the (HIST_BINS_MAX+1) bin */
 	return (bin >= (shared_histogram_info->bins)) ? (shared_histogram_info->bins) : bin;
-
 }
 
-TimestampTz  get_hist_last_reset() {
-
+TimestampTz
+get_hist_last_reset()
+{
 	TimestampTz  timestamp;
 
 	if (! shared_histogram_info) {
@@ -740,11 +735,11 @@ TimestampTz  get_hist_last_reset() {
 	LWLockRelease(shared_histogram_info->lock);
 
 	return timestamp;
-
 }
 
-histogram_data * query_hist_get_data(bool scale) {
-
+histogram_data *
+query_hist_get_data(bool scale)
+{
 	int i = 0;
 	double coeff = 0;
 	histogram_data * tmp = NULL;
@@ -794,7 +789,6 @@ histogram_data * query_hist_get_data(bool scale) {
 	LWLockRelease(shared_histogram_info->lock);
 
 	return tmp;
-
 }
 
 static void
@@ -827,7 +821,6 @@ set_histogram_bins_count_hook(int newval, void *extra)
 	}
 
 	HOOK_RETURN(true);
-
 }
 
 static void
@@ -861,7 +854,6 @@ set_histogram_bins_width_hook(int newval, void *extra)
 	}
 
 	HOOK_RETURN(true);
-
 }
 
 
@@ -884,7 +876,6 @@ set_histogram_sample_hook(int newval, void *extra)
 	}
 
 	HOOK_RETURN(true);
-
 }
 
 
@@ -919,7 +910,6 @@ set_histogram_type_hook(int newval, void *extra)
 	}
 
 	HOOK_RETURN(true);
-
 }
 
 
@@ -941,7 +931,6 @@ set_histogram_track_utility(bool newval, void *extra)
 	}
 
 	HOOK_RETURN(true);
-
 }
 
 static
@@ -963,5 +952,4 @@ bool query_histogram_enabled() {
 	}
 
 	return true;
-
 }
