@@ -43,6 +43,12 @@ static void set_histogram_sample_hook(int newval, void *extra);
 static void set_histogram_type_hook(int newval, void *extra);
 static void set_histogram_track_utility(bool newval, void *extra);
 
+static const char * show_histogram_bins_count_hook(void);
+static const char * show_histogram_bins_width_hook(void);
+static const char * show_histogram_sample_hook(void);
+static const char * show_histogram_type_hook(void);
+static const char * show_histogram_track_utility(void);
+
 /* return from a hook */
 #define HOOK_RETURN(a)	return;
 
@@ -163,7 +169,7 @@ _PG_init(void)
 							 0,
 							 NULL,
 							 &set_histogram_track_utility,
-							 NULL);
+							 &show_histogram_track_utility);
 
 	DefineCustomIntVariable("query_histogram.bin_count",
 						 "Sets the number of bins of the histogram.",
@@ -175,7 +181,7 @@ _PG_init(void)
 							0,
 							NULL,
 							&set_histogram_bins_count_hook,
-							NULL);
+							&show_histogram_bins_count_hook);
 
 	DefineCustomIntVariable("query_histogram.bin_width",
 						 "Sets the width of the histogram bin.",
@@ -187,7 +193,7 @@ _PG_init(void)
 							GUC_UNIT_MS,
 							NULL,
 							&set_histogram_bins_width_hook,
-							NULL);
+							&show_histogram_bins_width_hook);
 
 	DefineCustomIntVariable("query_histogram.sample_pct",
 						 "What portion of the queries should be sampled (in percent).",
@@ -199,7 +205,7 @@ _PG_init(void)
 							0,
 							NULL,
 							&set_histogram_sample_hook,
-							NULL);
+							&show_histogram_sample_hook);
 
 	DefineCustomEnumVariable("query_histogram.histogram_type",
 							 "Type of the histogram (how the bin width is computed).",
@@ -211,7 +217,7 @@ _PG_init(void)
 							 0,
 							 NULL,
 							 &set_histogram_type_hook,
-							 NULL);
+							 &show_histogram_type_hook);
 
 	EmitWarningsOnPlaceholders("query_histogram");
 
@@ -823,6 +829,26 @@ set_histogram_bins_count_hook(int newval, void *extra)
 	HOOK_RETURN(true);
 }
 
+static const char *
+show_histogram_bins_count_hook(void)
+{
+	static char nbuf[4];
+
+	int bins_count = default_histogram_bins;
+
+	/* if the histogram is dynamic and was initialized, get value from it */
+	if (histogram_is_dynamic && shared_histogram_info)
+	{
+		LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
+		bins_count = shared_histogram_info->bins;
+		LWLockRelease(shared_histogram_info->lock);
+	}
+
+	snprintf(nbuf, sizeof(nbuf), "%d", bins_count);
+
+	return nbuf;
+}
+
 static void
 set_histogram_bins_width_hook(int newval, void *extra)
 {
@@ -856,6 +882,25 @@ set_histogram_bins_width_hook(int newval, void *extra)
 	HOOK_RETURN(true);
 }
 
+static const char *
+show_histogram_bins_width_hook(void)
+{
+	static char nbuf[4];
+	int step = default_histogram_step;
+
+	/* if the histogram is dynamic and was initialized, get value from it */
+	if (histogram_is_dynamic && shared_histogram_info)
+	{
+		LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
+		step = shared_histogram_info->step;
+		LWLockRelease(shared_histogram_info->lock);
+	}
+
+	snprintf(nbuf, sizeof(nbuf), "%d", step);
+
+	return nbuf;
+}
+
 
 static void
 set_histogram_sample_hook(int newval, void *extra)
@@ -876,6 +921,26 @@ set_histogram_sample_hook(int newval, void *extra)
 	}
 
 	HOOK_RETURN(true);
+}
+
+static const char *
+show_histogram_sample_hook(void)
+{
+	static char nbuf[4];
+
+	int sample_pct = default_histogram_sample_pct;
+
+	/* if the histogram is dynamic and was initialized, get value from it */
+	if (histogram_is_dynamic && shared_histogram_info)
+	{
+		LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
+		sample_pct = shared_histogram_info->sample_pct;
+		LWLockRelease(shared_histogram_info->lock);
+	}
+
+	snprintf(nbuf, sizeof(nbuf), "%d", sample_pct);
+
+	return nbuf;
 }
 
 
@@ -912,6 +977,25 @@ set_histogram_type_hook(int newval, void *extra)
 	HOOK_RETURN(true);
 }
 
+static const char *
+show_histogram_type_hook(void)
+{
+	int type = default_histogram_type;
+
+	/* if the histogram is dynamic and was initialized, get value from it */
+	if (histogram_is_dynamic && shared_histogram_info)
+	{
+		LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
+		type = shared_histogram_info->type;
+		LWLockRelease(shared_histogram_info->lock);
+	}
+
+	if (type == HISTOGRAM_LINEAR)
+		return "linear";
+	else
+		return "log";
+}
+
 
 static void
 set_histogram_track_utility(bool newval, void *extra)
@@ -931,6 +1015,25 @@ set_histogram_track_utility(bool newval, void *extra)
 	}
 
 	HOOK_RETURN(true);
+}
+
+static const char *
+show_histogram_track_utility(void)
+{
+	bool track_utility = default_histogram_utility;
+
+	/* if the histogram is dynamic and was initialized, get value from it */
+	if (histogram_is_dynamic && shared_histogram_info)
+	{
+		LWLockAcquire(shared_histogram_info->lock, LW_SHARED);
+		track_utility = shared_histogram_info->track_utility;
+		LWLockRelease(shared_histogram_info->lock);
+	}
+
+	if (track_utility)
+		return "on";
+	else
+		return "off";
 }
 
 static
