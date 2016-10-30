@@ -10,6 +10,7 @@
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "storage/fd.h"
+#include "storage/shmem.h"
 
 #include "commands/explain.h"
 #include "executor/executor.h"
@@ -113,7 +114,7 @@ void		_PG_fini(void);
 static void explain_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void explain_ExecutorRun(QueryDesc *queryDesc,
 					ScanDirection direction,
-					long count);
+					uint64 count);
 static void explain_ExecutorEnd(QueryDesc *queryDesc);
 
 #if (PG_VERSION_NUM >= 90300)
@@ -143,7 +144,14 @@ void
 _PG_init(void)
 {
 
-	/* */
+	/*
+	 * In order to create our shared memory area, we have to be loaded via
+	 * shared_preload_libraries.  If not, fall out without hooking into any of
+	 * the main system.  (We don't throw error here because it seems useful to
+	 * allow the query_histogram functions to be created even when the
+	 * module isn't active.  The functions must protect themselves against
+	 * being called then, however.)
+	 */
 	if (!process_shared_preload_libraries_in_progress)
 		return;
 
@@ -239,7 +247,7 @@ _PG_init(void)
 	 * resources in histogram_shmem_startup().
 	 */
 	RequestAddinShmemSpace(get_histogram_size());
-	RequestAddinLWLocks(1);
+	RequestNamedLWLockTranche("query_histogram", 1);
 
 	/* Install hooks. */
 	prev_shmem_startup_hook = shmem_startup_hook;
@@ -312,7 +320,7 @@ explain_ExecutorStart(QueryDesc *queryDesc, int eflags)
  * ExecutorRun hook: all we need do is track nesting depth
  */
 static void
-explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
+explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 {
 	nesting_level++;
 	PG_TRY();
@@ -539,7 +547,7 @@ void histogram_shmem_startup() {
 	if (! found) {
 
 		/* First time through ... */
-		shared_histogram_info->lock = LWLockAssign();
+		shared_histogram_info->lock = &(GetNamedLWLockTranche("query_histogram"))->lock;
 
 		shared_histogram_info->type = default_histogram_type;
 		shared_histogram_info->bins = default_histogram_bins;
@@ -621,7 +629,7 @@ void histogram_load_from_file(void) {
 			memcpy(shared_histogram_info, buffer, sizeof(histogram_info_t));
 
 			/* FIXME Is this necessary? */
-			shared_histogram_info->lock = LWLockAssign();
+			shared_histogram_info->lock = &(GetNamedLWLockTranche("query_histogram"))->lock;
 
 			/* copy the values from the histogram */
 			default_histogram_type = shared_histogram_info->type;
