@@ -17,7 +17,7 @@
 #include "utils/guc.h"
 #include "tcop/utility.h"
 
-#include "libpq/md5.h"
+#include "common/md5.h"
 
 #include "queryhist.h"
 
