@@ -99,11 +99,11 @@ static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 void		_PG_init(void);
 void		_PG_fini(void);
 
-static void explain_ExecutorStart(QueryDesc *queryDesc, int eflags);
-static void explain_ExecutorRun(QueryDesc *queryDesc,
+static void histogram_ExecutorStart(QueryDesc *queryDesc, int eflags);
+static void histogram_ExecutorRun(QueryDesc *queryDesc,
 					ScanDirection direction,
 					uint64 count);
-static void explain_ExecutorEnd(QueryDesc *queryDesc);
+static void histogram_ExecutorEnd(QueryDesc *queryDesc);
 
 #if (PG_VERSION_NUM >= 90300)
 static void queryhist_ProcessUtility(Node *parsetree, const char *queryString,
@@ -118,7 +118,7 @@ static void queryhist_ProcessUtility(Node *parsetree,
 #endif
 
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
-static void explain_ExecutorFinish(QueryDesc *queryDesc);
+static void histogram_ExecutorFinish(QueryDesc *queryDesc);
 
 /* the whole histogram (info and data) */
 static histogram_info_t * shared_histogram_info = NULL;
@@ -228,13 +228,13 @@ _PG_init(void)
 	shmem_startup_hook = histogram_shmem_startup;
 
 	prev_ExecutorStart = ExecutorStart_hook;
-	ExecutorStart_hook = explain_ExecutorStart;
+	ExecutorStart_hook = histogram_ExecutorStart;
 	prev_ExecutorRun = ExecutorRun_hook;
-	ExecutorRun_hook = explain_ExecutorRun;
+	ExecutorRun_hook = histogram_ExecutorRun;
 	prev_ExecutorFinish = ExecutorFinish_hook;
-	ExecutorFinish_hook = explain_ExecutorFinish;
+	ExecutorFinish_hook = histogram_ExecutorFinish;
 	prev_ExecutorEnd = ExecutorEnd_hook;
-	ExecutorEnd_hook = explain_ExecutorEnd;
+	ExecutorEnd_hook = histogram_ExecutorEnd;
 	prev_ProcessUtility = ProcessUtility_hook;
 	ProcessUtility_hook = queryhist_ProcessUtility;
 }
@@ -258,7 +258,7 @@ _PG_fini(void)
  * ExecutorStart hook: start up logging if needed
  */
 static void
-explain_ExecutorStart(QueryDesc *queryDesc, int eflags)
+histogram_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 
 	if (prev_ExecutorStart)
@@ -289,7 +289,7 @@ explain_ExecutorStart(QueryDesc *queryDesc, int eflags)
  * ExecutorRun hook: all we need do is track nesting depth
  */
 static void
-explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
+histogram_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 {
 	nesting_level++;
 	PG_TRY();
@@ -312,7 +312,7 @@ explain_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
  * ExecutorFinish hook: all we need do is track nesting depth
  */
 static void
-explain_ExecutorFinish(QueryDesc *queryDesc)
+histogram_ExecutorFinish(QueryDesc *queryDesc)
 {
 	nesting_level++;
 	PG_TRY();
@@ -335,7 +335,7 @@ explain_ExecutorFinish(QueryDesc *queryDesc)
  * ExecutorEnd hook: log results if needed
  */
 static void
-explain_ExecutorEnd(QueryDesc *queryDesc)
+histogram_ExecutorEnd(QueryDesc *queryDesc)
 {
 	if (queryDesc->totaltime && (nesting_level == 0) && query_histogram_enabled())
 	{
